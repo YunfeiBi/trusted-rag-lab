@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import uuid
 
 from sqlalchemy import Boolean, CheckConstraint, Computed, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
-from sqlalchemy.dialects.postgresql import TSVECTOR
+from sqlalchemy.dialects.postgresql import TSVECTOR, JSONB
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -118,3 +118,20 @@ class Chunk(Base):
     keyword_text: Mapped[str] = mapped_column(Text)
     search_vector: Mapped[str] = mapped_column(TSVECTOR, Computed("to_tsvector('pg_catalog.simple'::regconfig, keyword_text)", persisted=True))
     embedding: Mapped[list[float]] = mapped_column(StoredVector(1024))
+
+
+class QuestionRecord(Base):
+    __tablename__ = 'question_records'
+    __table_args__ = (CheckConstraint("status IN ('answered','insufficient_evidence','generation_unavailable','invalid_citations','evidence_changed')",name='ck_question_status'),)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid,primary_key=True,default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('app_users.id'),index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id'),index=True)
+    question: Mapped[str] = mapped_column(Text)
+    answer: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32))
+    claims: Mapped[list] = mapped_column(JSONB)
+    citations: Mapped[list] = mapped_column(JSONB)
+    evidence: Mapped[list] = mapped_column(JSONB)
+    details: Mapped[dict] = mapped_column(JSONB)
+    trace_id: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),default=utcnow)

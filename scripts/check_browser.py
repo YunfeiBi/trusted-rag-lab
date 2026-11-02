@@ -65,8 +65,8 @@ async def main():
                 raise RuntimeError('Browser evaluation failed')
             return payload.get('result', {}).get('value')
 
-        async def wait_for(expression):
-            for attempt in range(60):
+        async def wait_for(expression, attempts=60):
+            for attempt in range(attempts):
                 if await evaluate(expression):
                     return
                 await asyncio.sleep(.2)
@@ -103,6 +103,8 @@ async def main():
                 assert await evaluate("document.querySelector('.member-form') === null"), 'Member management exposed'
             await screenshot(username + '.png')
             if username == 'demo_admin' and '--ingestion' in sys.argv:
+                await evaluate("document.querySelector('[data-nav=documents]').click()")
+                await wait_for("document.querySelector('main[data-page=documents]') && !document.querySelector('.project-grid') && !document.querySelector('#evidence-search')")
                 upload_file = output / 'browser-upload.md'
                 upload_file.write_text('# 浏览器合成验收\n\n这是自动生成的公开演示文字，用于验证上传、处理状态和原文预览。',encoding='utf-8')
                 await wait_for("document.querySelector('.upload-area input[type=file]') !== null")
@@ -131,7 +133,11 @@ async def main():
                 print('PASS browser file upload, consent, Worker status, version history and source preview')
             if username == 'demo_admin' and '--search' in sys.argv:
                 search_report = json.loads((ROOT / '.local' / 'search-live-check.json').read_text(encoding='utf-8'))
+                await evaluate("document.querySelector('[data-nav=projects]').click()")
+                await wait_for("document.querySelector('.project-card') !== null && !document.querySelector('[data-nav=projects]:disabled')")
                 await evaluate("(() => {const card=Array.from(document.querySelectorAll('.project-card')).find(e=>e.querySelector('h2').textContent==="+json.dumps(search_report['project_name'])+");if(!card)throw new Error('Synthetic search project not found');card.click()})()")
+                await wait_for("!document.querySelector('[data-nav=search]:disabled')")
+                await evaluate("document.querySelector('[data-nav=search]').click()")
                 await wait_for("document.querySelector('#evidence-search .muted')?.textContent.includes("+json.dumps(search_report['project_name'])+")")
                 await evaluate("(() => {const field=document.querySelector('.search-query');field.value='项目资料通过什么方式控制访问权限？';field.dispatchEvent(new Event('input',{bubbles:true}));const mode=document.querySelector('.search-options select');mode.value='keyword';mode.dispatchEvent(new Event('change',{bubbles:true}))})()")
                 await wait_for("document.querySelector('.search-consent') === null")
@@ -150,6 +156,33 @@ async def main():
                 await screenshot('search-mobile.png')
                 await rpc('Emulation.setDeviceMetricsOverride', {'width':1440,'height':1000,'deviceScaleFactor':1,'mobile':False})
                 print('PASS browser local keyword, real hybrid rerank, source line highlighting and mobile search width')
+            if username == 'demo_admin' and '--questions' in sys.argv:
+                report = json.loads((ROOT / '.local/qa-live-check.json').read_text(encoding='utf-8'))
+                await evaluate("document.querySelector('[data-nav=projects]').click()")
+                await wait_for("document.querySelector('.project-card') !== null && !document.querySelector('[data-nav=projects]:disabled')")
+                await evaluate("Array.from(document.querySelectorAll('.project-card')).find(e=>e.querySelector('h2').textContent==="+json.dumps(report['project_name'])+").click()")
+                await wait_for("!document.querySelector('[data-nav=questions]:disabled')")
+                await evaluate("document.querySelector('[data-nav=questions]').click()")
+                await wait_for("document.querySelector('.question-form') !== null && document.querySelectorAll('.history-item').length>=2")
+                assert await evaluate("!document.querySelector('.project-grid') && !document.querySelector('.upload-area') && !document.querySelector('#evidence-search') && location.hash.startsWith('#/questions?project=')"), 'Pages must be separate'
+                await evaluate("history.back()")
+                await wait_for("document.querySelector('main[data-page=projects]') !== null")
+                await evaluate("history.forward()")
+                await wait_for("document.querySelector('.question-form') !== null && !document.querySelector('.ask-submit')?.textContent.includes('正在')")
+                await evaluate("(() => {const field=document.querySelector('.question-input');field.value='项目管理员能做哪些成员管理操作？';field.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('.qa-consent input').click();document.querySelector('.question-form').requestSubmit()})()")
+                await wait_for("document.querySelector('.answer-block[data-status=answered]') !== null", attempts=450)
+                await evaluate("document.querySelector('.answer-claims .citation-button').click()")
+                await wait_for("document.querySelectorAll('.source-preview .focused-line').length>0")
+                await screenshot('questions-desktop.png')
+                await rpc('Emulation.setDeviceMetricsOverride', {'width':390,'height':844,'deviceScaleFactor':1,'mobile':True})
+                assert await evaluate('window.innerWidth === 390 && document.documentElement.scrollWidth <= 390'), 'Mobile questions page overflows'
+                await screenshot('questions-mobile.png')
+                await evaluate("document.querySelector('[data-mobile-nav=documents]').click()")
+                await wait_for("document.querySelector('main[data-page=documents]') !== null && !document.querySelector('.question-panel') && document.querySelector('.project-selector')?.value==="+json.dumps(report['project_id']))
+                await screenshot('documents-page-mobile.png')
+                await rpc('Emulation.setDeviceMetricsOverride', {'width':1440,'height':1000,'deviceScaleFactor':1,'mobile':False})
+                await screenshot('documents-page-desktop.png')
+                print('PASS separate pages, project context, back/forward, real QA, citations, private history and mobile navigation')
             await evaluate("Array.from(document.querySelectorAll('button')).find(e=>e.textContent==='退出登录').click()")
             await wait_for("document.querySelector('input[type=password]') !== null")
             print('PASS browser login, project scope and logout: ' + username)
@@ -157,7 +190,7 @@ async def main():
         await screenshot('login-mobile.png')
         assert await evaluate('document.documentElement.scrollWidth <= window.innerWidth'), 'Mobile horizontal overflow'
         print('PASS mobile login layout width; screenshots in .local/browser-check')
-        (output / 'result.json').write_text(json.dumps({'status': 'passed', 'users_checked': list(accounts), 'ingestion_checked':'--ingestion' in sys.argv, 'search_checked':'--search' in sys.argv, 'checked_at': time.time()}, indent=2), encoding='utf-8')
+        (output / 'result.json').write_text(json.dumps({'status': 'passed', 'users_checked': list(accounts), 'ingestion_checked':'--ingestion' in sys.argv, 'search_checked':'--search' in sys.argv, 'questions_checked':'--questions' in sys.argv, 'checked_at': time.time()}, indent=2), encoding='utf-8')
         await rpc('Browser.close')
     finally:
         if session:

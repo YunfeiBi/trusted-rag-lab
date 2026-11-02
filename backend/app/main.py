@@ -18,6 +18,8 @@ from .routes import router
 from .documents import router as documents_router
 from .search import router as search_router
 from .model_client import EmbeddingClient, RerankClient
+from .generation import ChatClient
+from .questions import router as questions_router
 
 logger = logging.getLogger('trusted_rag.requests')
 logger.setLevel(logging.INFO)
@@ -42,6 +44,7 @@ def create_app(settings=None, engine=None):
     application.state.settings = settings
     application.state.embedding_client = EmbeddingClient(timeout=15)
     application.state.rerank_client = RerankClient()
+    application.state.chat_client = ChatClient()
     application.state.engine = engine or create_engine(settings.database_url, pool_pre_ping=True, hide_parameters=True)
     application.state.session_factory = sessionmaker(application.state.engine, expire_on_commit=False)
     application.state.migration_head = ScriptDirectory.from_config(Config(str(ROOT / 'alembic.ini'))).get_current_head()
@@ -82,6 +85,7 @@ def create_app(settings=None, engine=None):
     application.include_router(router)
     application.include_router(documents_router)
     application.include_router(search_router)
+    application.include_router(questions_router)
     return application
 
 
