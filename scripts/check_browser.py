@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 import time
 import uuid
+import sys
 
 import httpx
 import websockets
@@ -84,14 +85,50 @@ async def main():
         accounts = {a['username']: a for a in records['accounts']}
         for username in ['demo_admin', 'demo_member', 'demo_other']:
             account = accounts[username]
+            with httpx.Client(base_url='http://127.0.0.1:8000/api',timeout=5) as api_client:
+                auth = api_client.post('/auth/login',json={'username':username,'password':account['password']})
+                auth.raise_for_status()
+                api_headers = {'Authorization':'Bearer '+auth.json()['access_token']}
+                try:
+                    project_response = api_client.get('/projects',headers=api_headers)
+                    project_response.raise_for_status()
+                    expected = [p['name'] for p in project_response.json()]
+                finally:
+                    api_client.post('/auth/logout',headers=api_headers)
             await evaluate("(() => {const u=document.querySelector('input[autocomplete=username]');const p=document.querySelector('input[type=password]');u.value=" + json.dumps(username) + ";u.dispatchEvent(new Event('input',{bubbles:true}));p.value=" + json.dumps(account['password']) + ";p.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('form').requestSubmit();return true})()")
-            await wait_for("document.querySelector('h1')?.textContent === '我的项目' && document.querySelectorAll('.project-card').length > 0 && !document.querySelector('button.primary:disabled')")
+            await wait_for("document.querySelector('h1')?.textContent === '我的项目' && document.querySelectorAll('.project-card').length > 0 && !document.querySelector('header button.primary:disabled')")
             names = await evaluate("Array.from(document.querySelectorAll('.project-card h2')).map(e=>e.textContent)")
-            expected = '独立项目 B' if username == 'demo_other' else '科研项目 A'
-            assert names == [expected], 'Unexpected project scope'
+            assert names == expected, 'UI project scope differs from server-authorized projects'
             if username == 'demo_member':
                 assert await evaluate("document.querySelector('.member-form') === null"), 'Member management exposed'
             await screenshot(username + '.png')
+            if username == 'demo_admin' and '--ingestion' in sys.argv:
+                upload_file = output / 'browser-upload.md'
+                upload_file.write_text('# 浏览器合成验收\n\n这是自动生成的公开演示文字，用于验证上传、处理状态和原文预览。',encoding='utf-8')
+                await wait_for("document.querySelector('.upload-area input[type=file]') !== null")
+                previous_version = await evaluate("(() => {const row=Array.from(document.querySelectorAll('.documents-table tbody tr')).find(e=>e.querySelector('strong')?.textContent==='browser-upload.md');if(row){const n=Number(row.querySelector('.badge').textContent.match(/v(\\d+)/)?.[1] || 0);Array.from(row.querySelectorAll('button')).find(e=>e.textContent==='更新').click();return n}return 0})()")
+                tree = await rpc('DOM.getDocument')
+                node = await rpc('DOM.querySelector',{'nodeId':tree['root']['nodeId'],'selector':'.upload-area input[type=file]'})
+                await rpc('DOM.setFileInputFiles',{'nodeId':node['nodeId'],'files':[str(upload_file)]})
+                await evaluate("document.querySelector('.upload-area input[type=checkbox]').click()")
+                await evaluate("document.querySelector('.upload-area').requestSubmit()")
+                for attempt in range(120):
+                    state = await evaluate("(() => {const row=Array.from(document.querySelectorAll('.documents-table tbody tr')).find(e=>e.querySelector('strong')?.textContent==='browser-upload.md');return !!row && row.querySelector('.badge').textContent.includes('v"+str(previous_version+1)+" · 已就绪') && document.querySelector('.upload-area input[type=file]').files.length===0})()")
+                    if state:
+                        break
+                    await asyncio.sleep(.5)
+                else:
+                    raise RuntimeError('Browser upload did not become ready')
+                await evaluate("(() => {const row=Array.from(document.querySelectorAll('.documents-table tbody tr')).find(e=>e.querySelector('strong')?.textContent==='browser-upload.md');Array.from(row.querySelectorAll('button')).find(e=>e.textContent==='版本与原文').click()})()")
+                await wait_for("document.querySelector('.version-panel .version-row') !== null")
+                await evaluate("document.querySelector('.version-panel .version-row button').click()")
+                await wait_for("document.querySelector('.markdown-source')?.textContent.includes('浏览器合成验收') && document.querySelectorAll('.chunk-card').length > 0")
+                await screenshot('documents-admin.png')
+                await rpc('Emulation.setDeviceMetricsOverride', {'width': 390, 'height': 844, 'deviceScaleFactor': 1, 'mobile': True})
+                await screenshot('documents-mobile.png')
+                assert await evaluate('window.innerWidth === 390 && document.documentElement.scrollWidth <= 390'), 'Mobile document page overflows'
+                await rpc('Emulation.setDeviceMetricsOverride', {'width': 1440, 'height': 1000, 'deviceScaleFactor': 1, 'mobile': False})
+                print('PASS browser file upload, consent, Worker status, version history and source preview')
             await evaluate("Array.from(document.querySelectorAll('button')).find(e=>e.textContent==='退出登录').click()")
             await wait_for("document.querySelector('input[type=password]') !== null")
             print('PASS browser login, project scope and logout: ' + username)

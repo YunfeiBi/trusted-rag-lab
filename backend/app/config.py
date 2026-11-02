@@ -12,6 +12,8 @@ ROOT = Path(__file__).resolve().parents[2]
 class Settings:
     database_url: URL
     session_hours: int = 8
+    storage_dir: Path = ROOT / 'storage'
+    max_upload_bytes: int = 20 * 1024 * 1024
 
     @classmethod
     def load(cls):

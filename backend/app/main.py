@@ -15,6 +15,7 @@ from starlette.exceptions import HTTPException
 
 from .config import ROOT, Settings
 from .routes import router
+from .documents import router as documents_router
 
 logger = logging.getLogger('trusted_rag.requests')
 logger.setLevel(logging.INFO)
@@ -75,6 +76,7 @@ def create_app(settings=None, engine=None):
         return error(request, 503, 'DATABASE_UNAVAILABLE', '数据库暂不可用或尚未迁移')
 
     application.include_router(router)
+    application.include_router(documents_router)
     return application
 
 

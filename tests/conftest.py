@@ -1,5 +1,6 @@
 import re
 import uuid
+from dataclasses import replace
 
 from alembic import command
 from alembic.config import Config
@@ -20,8 +21,8 @@ def hashes():
 
 
 @pytest.fixture
-def environment(hashes):
-    settings = Settings.load()
+def environment(hashes, tmp_path):
+    settings = replace(Settings.load(), storage_dir=tmp_path / 'storage')
     schema = 'test_rag_' + uuid.uuid4().hex
     assert re.fullmatch(r'test_rag_[0-9a-f]{32}', schema)
     control = create_engine(settings.database_url, hide_parameters=True)

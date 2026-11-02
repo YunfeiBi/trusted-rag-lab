@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
+import DocumentLibrary from './DocumentLibrary.vue'
 
 const user = ref(null)
 const token = ref('')
@@ -19,20 +20,24 @@ const memberSearch = ref('')
 const memberRole = ref('member')
 const isAdmin = computed(() => selected.value?.role === 'admin')
 
+function scrollLibrary() {
+  document.getElementById('document-library')?.scrollIntoView({ behavior: 'smooth' })
+}
+
 function reset() {
   token.value = ''; user.value = null; projects.value = []; selected.value = null; members.value = []
   password.value = ''; memberSearch.value = ''; projectForm.value = false
 }
 
-async function api(path, options = {}) {
+async function api(path, options = {}, format = 'json') {
   const requestToken = token.value
   const response = await fetch('/api' + path, {
     ...options,
-    headers: { 'Content-Type': 'application/json', ...(requestToken ? { Authorization: 'Bearer ' + requestToken } : {}), ...options.headers },
+    headers: { ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...(requestToken ? { Authorization: 'Bearer ' + requestToken } : {}), ...options.headers },
   })
   // Ignore responses from a previous identity instead of exposing stale project state.
   if (requestToken !== token.value) throw new Error('身份已变化，请重新操作')
-  const payload = response.status === 204 ? null : await response.json()
+  const payload = response.status === 204 ? null : response.ok && format === 'blob' ? await response.blob() : await response.json()
   if (!response.ok) {
     traceId.value = payload?.trace_id || response.headers.get('x-request-id') || ''
     if (response.status === 401 && path !== '/auth/login') reset()
@@ -113,7 +118,7 @@ onMounted(async () => {
       <h1>让知识有据可循，<br>让协作有序发生。</h1>
       <p class="intro-text">从项目空间开始，建立资料的访问边界。逐步连接文档、检索和有出处的回答。</p>
       <div class="principles"><span>01 项目隔离</span><span>02 证据溯源</span><span>03 版本可追踪</span></div>
-      <p class="stage-note">当前版本已开放项目与成员管理。知识库与问答功能开发中。</p>
+      <p class="stage-note">当前已开放项目、成员与资料入库。知识问答功能开发中。</p>
     </section>
     <section class="login-card">
       <p class="eyebrow">WELCOME BACK</p><h2>进入工作空间</h2><p class="muted">使用本机已创建的账号登录。</p>
@@ -132,7 +137,7 @@ onMounted(async () => {
       <div class="brand"><span class="brand-icon">知</span> 知序</div>
       <p class="sidebar-label">工作空间</p>
       <div class="nav-active">▦　项目管理</div>
-      <div class="nav-future">▤　资料与版本 <small>开发中</small></div>
+      <button class="nav-library" @click="scrollLibrary">▤　资料与版本</button>
       <div class="nav-future">◉　知识问答 <small>开发中</small></div>
       <div class="sidebar-bottom"><strong>{{ user.display_name }}</strong><span>{{ user.username }}</span><button class="ghost" :disabled="busy" @click="logout">退出登录</button></div>
     </aside>
@@ -162,7 +167,8 @@ onMounted(async () => {
           <p class="hint">系统会保护最后一位管理员。请先添加另一位管理员，再撤销或降级原管理员。</p>
         </template>
       </section>
-      <footer>本机课程原型 · 当前开放身份、项目及成员管理 · AI 辅助开发记录见项目文档</footer>
+      <DocumentLibrary v-if="selected" :key="selected.id" :project="selected" :api="api" />
+      <footer>本机课程原型 · 项目权限与资料入库 · AI 辅助开发记录见项目文档</footer>
     </main>
   </div>
 </template>
@@ -172,5 +178,10 @@ onMounted(async () => {
 </style>
 <style>
 .mobile-session { display: none; }
+.nav-library { border: 0; background: transparent; color: #53647b; text-align: left; padding: 14px; font-size: 13px; border-radius: 7px; }
+.nav-library:hover { background: #f4f6f9; }
+.workspace { grid-template-columns: 225px minmax(0, 1fr); }
+.workspace main { min-width: 0; }
+@media (max-width: 900px) { .workspace { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 900px) { .mobile-session { display: flex; justify-content: space-between; align-items: center; margin-bottom: 22px; } }
 </style>
