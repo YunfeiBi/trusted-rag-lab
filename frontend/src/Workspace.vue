@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import DocumentLibrary from './DocumentLibrary.vue'
+import SearchPanel from './SearchPanel.vue'
 
 const user = ref(null)
 const token = ref('')
@@ -24,6 +25,10 @@ function scrollLibrary() {
   document.getElementById('document-library')?.scrollIntoView({ behavior: 'smooth' })
 }
 
+function scrollSearch() {
+  document.getElementById('evidence-search')?.scrollIntoView({ behavior:'smooth' })
+}
+
 function reset() {
   token.value = ''; user.value = null; projects.value = []; selected.value = null; members.value = []
   password.value = ''; memberSearch.value = ''; projectForm.value = false
@@ -41,7 +46,9 @@ async function api(path, options = {}, format = 'json') {
   if (!response.ok) {
     traceId.value = payload?.trace_id || response.headers.get('x-request-id') || ''
     if (response.status === 401 && path !== '/auth/login') reset()
-    throw new Error(payload?.error?.message || '请求失败，请检查后端服务')
+    const failure = new Error(payload?.error?.message || '请求失败，请检查后端服务')
+    failure.traceId = traceId.value
+    throw failure
   }
   return payload
 }
@@ -118,7 +125,7 @@ onMounted(async () => {
       <h1>让知识有据可循，<br>让协作有序发生。</h1>
       <p class="intro-text">从项目空间开始，建立资料的访问边界。逐步连接文档、检索和有出处的回答。</p>
       <div class="principles"><span>01 项目隔离</span><span>02 证据溯源</span><span>03 版本可追踪</span></div>
-      <p class="stage-note">当前已开放项目、成员与资料入库。知识问答功能开发中。</p>
+      <p class="stage-note">当前已开放资料入库与证据检索。引用问答功能开发中。</p>
     </section>
     <section class="login-card">
       <p class="eyebrow">WELCOME BACK</p><h2>进入工作空间</h2><p class="muted">使用本机已创建的账号登录。</p>
@@ -138,6 +145,7 @@ onMounted(async () => {
       <p class="sidebar-label">工作空间</p>
       <div class="nav-active">▦　项目管理</div>
       <button class="nav-library" @click="scrollLibrary">▤　资料与版本</button>
+      <button class="nav-library" @click="scrollSearch">⌕　证据检索</button>
       <div class="nav-future">◉　知识问答 <small>开发中</small></div>
       <div class="sidebar-bottom"><strong>{{ user.display_name }}</strong><span>{{ user.username }}</span><button class="ghost" :disabled="busy" @click="logout">退出登录</button></div>
     </aside>
@@ -167,8 +175,9 @@ onMounted(async () => {
           <p class="hint">系统会保护最后一位管理员。请先添加另一位管理员，再撤销或降级原管理员。</p>
         </template>
       </section>
-      <DocumentLibrary v-if="selected" :key="selected.id" :project="selected" :api="api" />
-      <footer>本机课程原型 · 项目权限与资料入库 · AI 辅助开发记录见项目文档</footer>
+      <SearchPanel v-if="selected" :key="'search-'+selected.id" :project="selected" :api="api" />
+      <DocumentLibrary v-if="selected" :key="'docs-'+selected.id" :project="selected" :api="api" />
+      <footer>本机课程原型 · 授权检索与资料管理 · AI 辅助开发记录见项目文档</footer>
     </main>
   </div>
 </template>

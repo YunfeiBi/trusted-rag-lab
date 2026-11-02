@@ -129,6 +129,27 @@ async def main():
                 assert await evaluate('window.innerWidth === 390 && document.documentElement.scrollWidth <= 390'), 'Mobile document page overflows'
                 await rpc('Emulation.setDeviceMetricsOverride', {'width': 1440, 'height': 1000, 'deviceScaleFactor': 1, 'mobile': False})
                 print('PASS browser file upload, consent, Worker status, version history and source preview')
+            if username == 'demo_admin' and '--search' in sys.argv:
+                search_report = json.loads((ROOT / '.local' / 'search-live-check.json').read_text(encoding='utf-8'))
+                await evaluate("(() => {const card=Array.from(document.querySelectorAll('.project-card')).find(e=>e.querySelector('h2').textContent==="+json.dumps(search_report['project_name'])+");if(!card)throw new Error('Synthetic search project not found');card.click()})()")
+                await wait_for("document.querySelector('#evidence-search .muted')?.textContent.includes("+json.dumps(search_report['project_name'])+")")
+                await evaluate("(() => {const field=document.querySelector('.search-query');field.value='项目资料通过什么方式控制访问权限？';field.dispatchEvent(new Event('input',{bubbles:true}));const mode=document.querySelector('.search-options select');mode.value='keyword';mode.dispatchEvent(new Event('change',{bubbles:true}))})()")
+                await wait_for("document.querySelector('.search-consent') === null")
+                await evaluate("document.querySelector('.search-form').requestSubmit()")
+                await wait_for("document.querySelectorAll('.evidence-card').length>0 && document.querySelector('.search-details')?.textContent.includes('重排序状态：not_requested')")
+                await screenshot('search-keyword.png')
+                await evaluate("(() => {const mode=document.querySelector('.search-options select');mode.value='hybrid';mode.dispatchEvent(new Event('change',{bubbles:true}))})()")
+                await wait_for("document.querySelector('.search-consent input') !== null")
+                await evaluate("document.querySelector('.search-consent input').click();document.querySelector('.search-form').requestSubmit()")
+                await wait_for("document.querySelectorAll('.evidence-card').length>0 && document.querySelector('.search-details')?.textContent.includes('重排序状态：applied')")
+                await evaluate("document.querySelector('.evidence-card .source-button').click()")
+                await wait_for("document.querySelectorAll('.source-preview .focused-line').length>0")
+                await screenshot('search-hybrid.png')
+                await rpc('Emulation.setDeviceMetricsOverride', {'width':390,'height':844,'deviceScaleFactor':1,'mobile':True})
+                assert await evaluate('window.innerWidth === 390 && document.documentElement.scrollWidth <= 390'), 'Mobile search page overflows'
+                await screenshot('search-mobile.png')
+                await rpc('Emulation.setDeviceMetricsOverride', {'width':1440,'height':1000,'deviceScaleFactor':1,'mobile':False})
+                print('PASS browser local keyword, real hybrid rerank, source line highlighting and mobile search width')
             await evaluate("Array.from(document.querySelectorAll('button')).find(e=>e.textContent==='退出登录').click()")
             await wait_for("document.querySelector('input[type=password]') !== null")
             print('PASS browser login, project scope and logout: ' + username)
@@ -136,7 +157,7 @@ async def main():
         await screenshot('login-mobile.png')
         assert await evaluate('document.documentElement.scrollWidth <= window.innerWidth'), 'Mobile horizontal overflow'
         print('PASS mobile login layout width; screenshots in .local/browser-check')
-        (output / 'result.json').write_text(json.dumps({'status': 'passed', 'users_checked': list(accounts), 'checked_at': time.time()}, indent=2), encoding='utf-8')
+        (output / 'result.json').write_text(json.dumps({'status': 'passed', 'users_checked': list(accounts), 'ingestion_checked':'--ingestion' in sys.argv, 'search_checked':'--search' in sys.argv, 'checked_at': time.time()}, indent=2), encoding='utf-8')
         await rpc('Browser.close')
     finally:
         if session:
