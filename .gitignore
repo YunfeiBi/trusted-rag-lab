@@ -7,6 +7,8 @@
 
 # Python
 .venv/
+.local/
+.pgpass.local
 venv/
 __pycache__/
 *.py[cod]

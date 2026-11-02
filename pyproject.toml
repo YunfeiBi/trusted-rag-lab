@@ -1,0 +1,16 @@
+[project]
+name = "trusted-rag-lab"
+version = "0.1.0"
+description = "Course project development environment for trustworthy RAG"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "fastapi", "uvicorn[standard]", "sqlalchemy", "psycopg[binary]",
+  "pgvector", "pydantic-settings", "httpx", "python-multipart",
+  "pypdf", "jieba", "numpy", "alembic"
+]
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[tool.uv]
+package = false
