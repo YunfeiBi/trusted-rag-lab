@@ -6,11 +6,19 @@ requires-python = ">=3.13,<3.14"
 dependencies = [
   "fastapi", "uvicorn[standard]", "sqlalchemy", "psycopg[binary]",
   "pgvector", "pydantic-settings", "httpx", "python-multipart",
-  "pypdf", "jieba", "numpy", "alembic"
+  "pypdf", "jieba", "numpy", "alembic", "python-dotenv"
 ]
 
 [dependency-groups]
-dev = ["pytest", "ruff"]
+dev = ["pytest", "ruff", "websockets"]
 
 [tool.uv]
 package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120

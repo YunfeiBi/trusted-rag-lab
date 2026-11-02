@@ -505,6 +505,7 @@ dependencies = [
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic-settings" },
     { name = "pypdf" },
+    { name = "python-dotenv" },
     { name = "python-multipart" },
     { name = "sqlalchemy" },
     { name = "uvicorn", extra = ["standard"] },
@@ -514,6 +515,7 @@ dependencies = [
 dev = [
     { name = "pytest" },
     { name = "ruff" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
@@ -527,6 +529,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"] },
     { name = "pydantic-settings" },
     { name = "pypdf" },
+    { name = "python-dotenv" },
     { name = "python-multipart" },
     { name = "sqlalchemy" },
     { name = "uvicorn", extras = ["standard"] },
@@ -536,6 +539,7 @@ requires-dist = [
 dev = [
     { name = "pytest" },
     { name = "ruff" },
+    { name = "websockets" },
 ]
 
 [[package]]
