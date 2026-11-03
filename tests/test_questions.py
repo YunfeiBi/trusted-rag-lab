@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.generation import AnswerDraft, validate_claims
+from backend.app.generation import AnswerDraft, CitationValidationError, validate_claims
 from backend.app.ingestion import IngestionError
 from backend.app.models import QuestionRecord
 from tests.conftest import login
@@ -141,3 +141,43 @@ def test_quote_validation_is_not_entailment():
     evidence = [{'evidence_id': 'E1', 'text': 'Membership controls access.'}]
     draft = AnswerDraft.model_validate({'answerable': True, 'claims': [{'text': 'A claim still requires human semantic review.', 'supports': [{'evidence_id': 'E1', 'quote': evidence[0]['text']}]}]})
     assert validate_claims(draft, evidence)[0]
+
+
+def test_pdf_layout_whitespace_preserves_exact_source_quote():
+    source = '申请方式：家庭经济困\n难学生可以申请国家助学贷款，\u3000并向学院申请临时困难补助。'
+    quote = '家庭经济困难学生可以申请国家助学贷款，并向学院申请临时困难补助'
+    draft = {'answerable': True, 'claims': [{'text': '可以申请国家助学贷款和临时困难补助。',
+        'supports': [{'evidence_id': 'E1', 'quote': quote}]}]}
+    answerable, answer, claims, citations = validate_claims(draft, [{'evidence_id': 'E1', 'text': source}])
+    assert answerable and '可以申请' in answer and claims[0]['evidence_ids'] == ['E1']
+    assert citations[0]['quote'] in source
+    assert '\n' in citations[0]['quote'] and '\u3000' in citations[0]['quote']
+
+
+@pytest.mark.parametrize('quote,code', [
+    ('家庭经济困难学生可以申请国家奖学金', 'QUOTE_NOT_IN_EVIDENCE'),
+    ('家庭经济困难学生……可以申请国家助学贷款', 'QUOTE_NOT_IN_EVIDENCE'),
+    ('家庭经济困难学生，可以申请国家助学贷款', 'QUOTE_NOT_IN_EVIDENCE'),
+    ('家 庭 经 济 困 难', 'QUOTE_TOO_SHORT'),
+])
+def test_whitespace_matching_still_rejects_changed_or_short_quotes(quote, code):
+    draft = {'answerable': True, 'claims': [{'text': 'Rejected draft.',
+        'supports': [{'evidence_id': 'E1', 'quote': quote}]}]}
+    with pytest.raises(CitationValidationError) as failure:
+        validate_claims(draft, [{'evidence_id': 'E1', 'text': '家庭经济困\n难学生可以申请国家助学贷款'}])
+    assert failure.value.code == code
+
+
+def test_quote_failure_returns_safe_reason_without_draft(qa):
+    client, engine, ids, owner = qa
+    ingest(client, engine, ids, owner, 'membership controls access')
+    client.app.state.chat_client.draft = {'answerable': True, 'claims': [{'text': 'SECRET_DRAFT',
+        'supports': [{'evidence_id': 'E1', 'quote': 'fabricated quote missing'}]}]}
+    response = ask(client, ids, owner)
+    data = response.json()
+    assert data['status'] == 'invalid_citations'
+    assert data['details']['warnings'][-1]['code'] == 'QUOTE_NOT_IN_EVIDENCE'
+    assert 'SECRET_DRAFT' not in response.text
+    with Session(engine) as db:
+        row = db.scalar(select(QuestionRecord))
+        assert row.claims == [] and row.citations == [] and 'SECRET_DRAFT' not in row.answer

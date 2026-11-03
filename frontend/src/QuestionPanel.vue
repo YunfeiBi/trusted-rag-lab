@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import SourcePreview from './SourcePreview.vue'
 
 const props = defineProps({ project:{type:Object,required:true},api:{type:Function,required:true} })
@@ -15,7 +15,15 @@ const source = ref(null)
 let alive = true
 let polling = false
 let timer
-const statuses = {answered:'已生成引用回答',insufficient_evidence:'依据不足',generation_unavailable:'生成服务暂不可用',invalid_citations:'引用校验未通过',evidence_changed:'依据已变化'}
+const statuses = {answered:'已生成引用回答',insufficient_evidence:'依据不足',generation_unavailable:'生成服务暂不可用',invalid_citations:'生成内容校验未通过',evidence_changed:'依据已变化'}
+const visibleWarnings = computed(() => {
+  const seen = new Set(record.value?.status === 'answered' ? [] : [record.value?.answer])
+  return (record.value?.details.warnings || []).filter(warning => {
+    if (seen.has(warning.message)) return false
+    seen.add(warning.message)
+    return true
+  })
+})
 
 async function loadHistory() {
   const data = await props.api('/questions?project_id='+props.project.id)
@@ -85,11 +93,11 @@ onUnmounted(() => { alive = false; clearInterval(timer) })
       <p v-if="error" class="error" role="alert">{{ error }}<small v-if="errorTrace">追踪编号：{{ errorTrace }}</small></p>
       <section v-if="record" class="answer-block" :data-status="record.status">
         <div class="answer-heading"><h3>{{ statuses[record.status] }}</h3><span>{{ time(record.created_at) }}</span></div><p class="answered-question">{{ record.question }}</p>
-        <p class="verification-note">引用编号及原文摘录匹配不等于事实正确，请核对证据是否支持结论。</p>
+        <p v-if="record.status==='answered'" class="verification-note">回答由大模型结合下方检索证据生成；引用匹配不等于事实正确，请核对原文是否支持结论。</p>
         <div v-if="record.status==='answered'" class="answer-claims"><p v-for="(claim,index) in record.claims" :key="index">{{ claim.text }} <button v-for="id in claim.evidence_ids" :key="id" class="citation-button" @click="openCitation(id)">[{{ id }}]</button></p></div>
         <p v-else class="qa-notice">{{ record.answer }}</p>
         <details v-if="record.citations.length" class="quote-details"><summary>查看引用摘录</summary><blockquote v-for="(citation,index) in record.citations" :key="index"><button class="citation-button" @click="openCitation(citation.evidence_id)">[{{ citation.evidence_id }}]</button> {{ citation.quote }}</blockquote></details>
-        <div v-for="(warning,index) in record.details.warnings" :key="index" class="qa-warning">{{ warning.message }}</div>
+        <div v-for="(warning,index) in visibleWarnings" :key="index" class="qa-warning">{{ warning.message }}</div>
         <section v-if="record.evidence.length" class="qa-evidence"><h3>本次可核对的证据</h3><article v-for="evidence in record.evidence" :key="evidence.chunk_id"><div><span class="badge">{{ evidence.evidence_id }}</span> <strong>{{ evidence.title }}</strong> <small>v{{ evidence.version_number }}</small></div><p>{{ evidence.page ? `第 ${evidence.page} 页` : `第 ${evidence.line_start}—${evidence.line_end} 行` }} {{ evidence.section ? `· ${evidence.section}` : '' }}</p><button class="ghost" @click="source = evidence">查看原文</button></article></section>
         <details class="qa-details"><summary>查看生成与检索记录</summary><p>模型：{{ record.details.chat_model }} · 提示版本：{{ record.details.prompt_version }}</p><p>检索：{{ record.details.retrieval?.effective_mode }} · 重排：{{ record.details.retrieval?.rerank_status }}</p><p>生成耗时：{{ record.details.generation_ms }} ms · 服务内总耗时：{{ record.details.total_ms }} ms</p><p>追踪编号：{{ record.trace_id }}</p></details>
       </section>

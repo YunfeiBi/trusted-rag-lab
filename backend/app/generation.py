@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, 
 from .config import ROOT
 from .ingestion import IngestionError
 
-PROMPT_VERSION = 'grounded-claims-v1'
+PROMPT_VERSION = 'grounded-claims-v2'
 
 
 class Support(BaseModel):
@@ -43,7 +43,7 @@ SYSTEM_PROMPT = '''你是一个依据资料回答问题的助手。只使用本�
 若资料不能直接支持问题所需信息，返回 {"answerable":false,"claims":[]}，不要猜测。
 若可回答，用简短中文事实段落逐项回答，每项都需要证据支持。严格返回json，不要Markdown围栏或额外字段。
 格式示例：{"answerable":true,"claims":[{"text":"项目访问由成员关系控制。","supports":[{"evidence_id":"E1","quote":"项目资料通过成员关系控制访问"}]}]}。
-每个quote必须是对应证据正文中的连续原文，至少8个字符，不要省略、改写或添加省略号。
+每个quote必须是对应证据正文中的连续原文，至少8个非空白字符，不要省略文字、改写或添加省略号。PDF原文中排版换行和空格可以保留。
 text中不要自行插入[E1]等引用标记，由服务端添加。证据不足时不要因为有相关词就声称可以回答。'''
 
 
@@ -81,21 +81,46 @@ class ChatClient:
             raise IngestionError('GENERATION_INVALID_RESPONSE') from exc
 
 
+class CitationValidationError(ValueError):
+    """Safe failure category; never include rejected draft or source text."""
+
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+def source_quote(quote, source):
+    """Match identical non-whitespace characters, then return the original span.
+
+    PDF extraction can insert line breaks inside Chinese words. Only whitespace
+    is ignored: punctuation, characters and their order must still match.
+    """
+    compact = ''.join(quote.split())
+    if len(compact) < 8:
+        raise CitationValidationError('QUOTE_TOO_SHORT')
+    positions = [match.start() for match in re.finditer(r'\S', source)]
+    normalized = ''.join(source[position] for position in positions)
+    start = normalized.find(compact)
+    if start < 0:
+        raise CitationValidationError('QUOTE_NOT_IN_EVIDENCE')
+    return source[positions[start]:positions[start + len(compact) - 1] + 1]
+
+
 def validate_claims(draft, evidence):
     draft = AnswerDraft.model_validate(draft)
     by_id = {e['evidence_id']:e for e in evidence}
-    normalize = lambda text:' '.join(text.split())
     claims, citations = [], []
     for index,claim in enumerate(draft.claims):
         if re.search(r'\[E\d+\]',claim.text,flags=re.IGNORECASE):
-            raise ValueError('Citation markers must be server assigned')
+            raise CitationValidationError('MODEL_CITATION_MARKERS')
         references = []
         for support in claim.supports:
-            if len(normalize(support.quote)) < 8 or support.evidence_id not in by_id or normalize(support.quote) not in normalize(by_id[support.evidence_id]['text']):
-                raise ValueError('Unsupported reference or quote')
+            if support.evidence_id not in by_id:
+                raise CitationValidationError('UNKNOWN_EVIDENCE_ID')
+            quote = source_quote(support.quote, by_id[support.evidence_id]['text'])
             if support.evidence_id not in references:
                 references.append(support.evidence_id)
-            citation = {'evidence_id':support.evidence_id,'quote':support.quote,'claim_index':index}
+            citation = {'evidence_id':support.evidence_id,'quote':quote,'claim_index':index}
             if citation not in citations:
                 citations.append(citation)
         claims.append({'text':claim.text,'evidence_ids':references})

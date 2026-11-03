@@ -268,6 +268,47 @@ async def main():
                 await evaluate("(() => {const field=document.querySelector('.team-selector');field.value="+json.dumps(target_project['team_id'])+";field.dispatchEvent(new Event('change',{bubbles:true}))})()")
                 await wait_for("Array.from(document.querySelectorAll('.project-card h2')).some(e=>e.textContent==="+json.dumps(project_name)+") && !document.querySelector('[data-nav=projects]:disabled')")
                 await evaluate("Array.from(document.querySelectorAll('.project-card')).find(e=>e.querySelector('h2').textContent==="+json.dumps(project_name)+").click()")
+
+            if username == 'demo_admin' and '--qa-ui' in sys.argv:
+                # Browser-only synthetic responses: no model call or DB record.
+                await evaluate("""(() => {
+                    window.__qaOriginalFetch = window.fetch;
+                    const notice = '生成内容未通过结构、引用或原文摘录校验，已停止展示该草稿，请查看证据或重新提问。';
+                    window.__qaReply = {id:'synthetic-ui',question:'合成问题：困难学生有哪些帮助途径？',
+                      created_at:new Date().toISOString(),status:'answered',answer:'可以申请临时困难补助。 [E1]',
+                      claims:[{text:'可以申请临时困难补助。',evidence_ids:['E1']}],
+                      citations:[{evidence_id:'E1',quote:'符合条件的困难学生可以申请临时困难补助。',claim_index:0}],
+                      evidence:[{evidence_id:'E1',chunk_id:'synthetic-chunk',title:'合成资料（界面验证）',version_number:1,page:1}],
+                      details:{warnings:[],retrieval:{effective_mode:'hybrid',rerank_status:'applied'},generation_ms:100,total_ms:150}};
+                    window.__qaFailure = {...window.__qaReply,status:'invalid_citations',answer:notice,
+                      claims:[],citations:[],details:{...window.__qaReply.details,warnings:[{code:'CITATION_VALIDATION_FAILED',message:notice}]}};
+                    window.fetch = async (url,options) => {
+                      const parsed = new URL(url,location.href);
+                      if (parsed.pathname === '/api/questions' || parsed.pathname.startsWith('/api/questions/')) {
+                        const payload = parsed.pathname === '/api/questions' && options?.method !== 'POST' ? [] : window.__qaReply;
+                        return new Response(JSON.stringify(payload),{status:200,headers:{'Content-Type':'application/json'}});
+                      }
+                      return window.__qaOriginalFetch(url,options);
+                    };
+                })()""")
+                await evaluate("document.querySelector('[data-nav=questions]').click()")
+                await wait_for("document.querySelector('.question-input') && !document.querySelector('.question-history .ghost:disabled')")
+                await evaluate("(() => {const field=document.querySelector('.question-input');field.value='合成问题：困难学生有哪些帮助途径？';field.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('.qa-consent input').click();document.querySelector('.question-form').requestSubmit()})()")
+                await wait_for("document.querySelector('[data-status=answered] .answer-claims')?.textContent.includes('临时困难补助')")
+                assert await evaluate("document.querySelectorAll('.answer-claims .citation-button').length===1")
+                await screenshot('qa-ui-answer.png')
+                await evaluate("window.__qaReply=window.__qaFailure;document.querySelector('.question-form').requestSubmit()")
+                await wait_for("document.querySelector('[data-status=invalid_citations] .qa-notice') !== null")
+                assert await evaluate("document.querySelectorAll('.qa-notice').length===1 && document.querySelectorAll('.qa-warning').length===0 && !document.querySelector('.answer-claims') && !document.querySelector('.verification-note')"), 'Rejected answer or duplicate warning displayed'
+                await screenshot('qa-ui-failure.png')
+                await rpc('Emulation.setDeviceMetricsOverride', {'width':390,'height':844,'deviceScaleFactor':1,'mobile':True})
+                assert await evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+                await screenshot('qa-ui-failure-mobile.png')
+                await rpc('Emulation.setDeviceMetricsOverride', {'width':1440,'height':1000,'deviceScaleFactor':1,'mobile':False})
+                await evaluate("document.querySelector('[data-nav=projects]').click()")
+                await wait_for("!document.querySelector('.question-panel') && document.querySelector('.project-card') !== null")
+                await evaluate("window.fetch=window.__qaOriginalFetch;delete window.__qaOriginalFetch;delete window.__qaReply;delete window.__qaFailure")
+                print('PASS synthetic QA rendering, citations, duplicate warning removal and mobile layout; no model call')
                 await wait_for("!document.querySelector('[data-nav=projects]:disabled')")
             if username == 'demo_admin' and '--centers' in sys.argv:
                 report=json.loads((ROOT/'.local/centers-live-check.json').read_text(encoding='utf-8'))
@@ -412,7 +453,7 @@ async def main():
         await screenshot('login-mobile.png')
         assert await evaluate('document.documentElement.scrollWidth <= window.innerWidth'), 'Mobile horizontal overflow'
         print('PASS mobile login layout width; screenshots in .local/browser-check')
-        (output / 'result.json').write_text(json.dumps({'status': 'passed', 'users_checked': list(accounts), 'ingestion_checked':'--ingestion' in sys.argv, 'search_checked':'--search' in sys.argv, 'questions_checked':'--questions' in sys.argv, 'runtime_checked':'--runtime' in sys.argv,'centers_checked':'--centers' in sys.argv,'accounts_checked':'--accounts' in sys.argv,'team_deletion_checked':'--delete-team' in sys.argv, 'checked_at': time.time()}, indent=2), encoding='utf-8')
+        (output / 'result.json').write_text(json.dumps({'status': 'passed', 'users_checked': list(accounts), 'ingestion_checked':'--ingestion' in sys.argv, 'search_checked':'--search' in sys.argv, 'questions_checked':'--questions' in sys.argv, 'synthetic_qa_ui_checked':'--qa-ui' in sys.argv, 'runtime_checked':'--runtime' in sys.argv,'centers_checked':'--centers' in sys.argv,'accounts_checked':'--accounts' in sys.argv,'team_deletion_checked':'--delete-team' in sys.argv, 'checked_at': time.time()}, indent=2), encoding='utf-8')
         await rpc('Browser.close')
     finally:
         if session:

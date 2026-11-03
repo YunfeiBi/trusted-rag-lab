@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 
 from .dependencies import CurrentUser, Db, bearer
-from .generation import PROMPT_VERSION, validate_claims
+from .generation import PROMPT_VERSION, CitationValidationError, validate_claims
 from .ingestion import IngestionError
 from .models import Chunk, QuestionRecord
 from .search import SearchInput, authorized_scope, check_access, retrieve
@@ -22,6 +22,13 @@ MESSAGES = {
     'generation_unavailable':'生成服务暂不可用，可先查看下方授权证据片段。',
     'invalid_citations':'生成内容未通过结构、引用或原文摘录校验，已停止展示该草稿，请查看证据或重新提问。',
     'evidence_changed':'资料或版本已变化，当前不展示该回答，请重新提问。',
+}
+
+VALIDATION_MESSAGES = {
+    'QUOTE_NOT_IN_EVIDENCE':'模型提供的摘录与对应原文文字不一致，已隐藏草稿。可重新生成；若持续发生，请核对检索证据是否相关。',
+    'QUOTE_TOO_SHORT':'模型提供的原文摘录过短，无法完成引用核对，已隐藏草稿。',
+    'UNKNOWN_EVIDENCE_ID':'模型引用了本次检索中不存在的证据编号，已隐藏草稿。',
+    'MODEL_CITATION_MARKERS':'模型未遵守引用格式，已隐藏草稿，请重新生成。',
 }
 
 
@@ -93,6 +100,11 @@ def ask(data: QuestionInput, user: CurrentUser, db: Db, request: Request,
             except IngestionError as exc:
                 status = 'invalid_citations' if exc.code=='GENERATION_INVALID_RESPONSE' else 'generation_unavailable'
                 answer = MESSAGES[status]
+                claims,citations = [],[]
+                details['warnings'].append({'code':exc.code,'message':answer})
+            except CitationValidationError as exc:
+                status = 'invalid_citations'
+                answer = VALIDATION_MESSAGES[exc.code]
                 claims,citations = [],[]
                 details['warnings'].append({'code':exc.code,'message':answer})
             except (ValueError,KeyError,TypeError,ValidationError):
