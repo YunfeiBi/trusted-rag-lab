@@ -6,11 +6,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 
 from .dependencies import CurrentUser, Db, bearer, require_membership
 from .models import LoginSession, Membership, Project, User, utcnow
-from .schemas import LoginInput, LoginOutput, MemberInput, MemberOutput, ProjectInput, ProjectOutput, UserOutput
-from .security import DUMMY_HASH, token_digest, verify_password
+from .schemas import ContactUserOutput, LoginInput, LoginOutput, MemberInput, MemberOutput, ProfileInput, ProjectInput, ProjectOutput, ProjectUpdate, RegisterInput, UserOutput, normalize_username
+from .security import DUMMY_HASH, hash_password, token_digest, verify_password
 from .audit import record_event
 
 router = APIRouter(prefix='/api')
@@ -39,11 +40,34 @@ def login(data: LoginInput, db: Db, request: Request):
     expires = utcnow() + timedelta(hours=request.app.state.settings.session_hours)
     db.add(LoginSession(token_hash=token_digest(token), user_id=user.id, expires_at=expires))
     db.commit()
-    return LoginOutput(access_token=token, expires_at=expires, user=UserOutput.model_validate(user))
+    return LoginOutput(access_token=token, expires_at=expires, user=ContactUserOutput.model_validate(user))
 
 
-@router.get('/auth/me', response_model=UserOutput)
+@router.post('/auth/register',response_model=ContactUserOutput,status_code=201)
+def register(data:RegisterInput,db:Db):
+    user=User(username=data.username,display_name=data.username,qq_email=data.qq_email,password_hash=hash_password(data.password))
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409,'用户名或QQ邮箱已被使用，请更换后重试。') from None
+    return user
+
+
+@router.get('/auth/me', response_model=ContactUserOutput)
 def me(user: CurrentUser):
+    return user
+
+
+@router.patch('/auth/me',response_model=ContactUserOutput)
+def update_profile(data:ProfileInput,user:CurrentUser,db:Db):
+    user.display_name,user.qq_email=data.display_name,data.qq_email
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409,'该QQ邮箱已被使用，请检查后重试。') from None
     return user
 
 
@@ -82,11 +106,21 @@ def read_project(project_id: UUID, user: CurrentUser, db: Db):
     return project_output(project, membership)
 
 
+@router.patch('/projects/{project_id}',response_model=ProjectOutput)
+def update_project(project_id:UUID,data:ProjectUpdate,user:CurrentUser,db:Db,request:Request):
+    project,membership=require_membership(db,project_id,user.id,admin=True,lock=True)
+    for field,value in data.model_dump(exclude_unset=True).items():
+        setattr(project,field,value)
+    record_event(db,project_id,user.id,'project.updated',project_id,request.state.trace_id)
+    db.commit()
+    return project_output(project,membership)
+
+
 @router.get('/projects/{project_id}/members', response_model=list[MemberOutput])
 def members(project_id: UUID, user: CurrentUser, db: Db):
-    require_membership(db, project_id, user.id, admin=True)
+    require_membership(db, project_id, user.id)
     rows = db.execute(select(User, Membership.role).join(Membership, User.id == Membership.user_id).where(Membership.project_id == project_id).order_by(User.username))
-    return [MemberOutput(user=UserOutput.model_validate(u), role=role) for u, role in rows]
+    return [MemberOutput(user=ContactUserOutput.model_validate(u), role=role) for u, role in rows]
 
 
 def protect_last_admin(db, project_id, target, new_role):
@@ -110,7 +144,7 @@ def put_member(project_id: UUID, user_id: UUID, data: MemberInput, user: Current
         db.add(Membership(project_id=project_id, user_id=user_id, role=data.role))
     record_event(db,project_id,user.id,'member.updated',user_id,request.state.trace_id,{'role':data.role})
     db.commit()
-    return MemberOutput(user=UserOutput.model_validate(target_user), role=data.role)
+    return MemberOutput(user=ContactUserOutput.model_validate(target_user), role=data.role)
 
 
 @router.delete('/projects/{project_id}/members/{user_id}', status_code=204)
@@ -131,4 +165,8 @@ def find_user(user: CurrentUser, db: Db, username: str = Query(min_length=1, max
     manages_project = db.scalar(select(Membership.project_id).where(Membership.user_id == user.id, Membership.role == 'admin').limit(1))
     if manages_project is None:
         raise HTTPException(403, '需要项目管理员权限')
+    try:
+        username=normalize_username(username)
+    except ValueError:
+        raise HTTPException(422,'用户名格式不正确。') from None
     return db.scalars(select(User).where(User.username == username, User.is_active.is_(True))).all()

@@ -3,7 +3,7 @@ import { onMounted,onUnmounted,ref } from 'vue'
 const props=defineProps({project:Object,api:Function})
 const health=ref(null), limits=ref(null), events=ref([]), error=ref(''), trace=ref(''), offset=ref(0)
 let alive=true,timer,loading=false
-const actions={'project.created':'创建项目','member.updated':'更新成员角色','member.removed':'撤销成员','document.version_uploaded':'上传资料版本','document.withdrawn':'撤下资料','task.retried':'重试任务','evaluation.case_created':'创建评测样例','evaluation.run_completed':'完成检索评测'}
+const actions={'project.created':'创建项目','project.updated':'修改项目信息','member.updated':'更新成员角色','member.removed':'撤销成员','document.version_uploaded':'上传资料版本','document.withdrawn':'撤下资料','task.retried':'重试任务','evaluation.case_created':'创建评测样例','evaluation.run_completed':'完成检索评测'}
 const time=v=>v?new Date(v).toLocaleString('zh-CN',{hour12:false}):'暂无'
 async function load(){if(loading)return;loading=true;try{const data=await props.api('/projects/'+props.project.id+'/ingestion-status');const cfg=await props.api('/file-limits');const audit=props.project.role==='admin'?await props.api(`/projects/${props.project.id}/audit-events?offset=${offset.value}&limit=30`):[];if(alive){health.value=data;limits.value=cfg;events.value=audit;error.value=''}}catch(e){if(alive){health.value=null;events.value=[];error.value=e.message;trace.value=e.traceId||''}}finally{loading=false}}
 async function page(step){offset.value=Math.max(0,offset.value+step);await load()}

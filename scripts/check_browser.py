@@ -7,6 +7,7 @@ from pathlib import Path
 import time
 import uuid
 import sys
+import secrets
 
 import httpx
 import websockets
@@ -82,6 +83,76 @@ async def main():
         await wait_for("document.querySelector('.service-status')?.textContent.includes('本机服务已就绪')")
         await wait_for("document.querySelector('.university-emblem')?.naturalWidth > 0")
         await screenshot('login.png')
+        if '--accounts' in sys.argv:
+            suffix=uuid.uuid4().hex[:8]
+            owner_name='注册验收甲'+suffix
+            member_name='注册验收乙'+suffix
+            test_password=secrets.token_urlsafe(20)
+            owner_email='codex.owner.'+suffix+'@qq.com'
+            member_email='codex.member.'+suffix+'@qq.com'
+            updated_email='codex.updated.'+suffix+'@qq.com'
+            with httpx.Client(base_url='http://127.0.0.1:8000/api',timeout=10) as client:
+                response=client.post('/auth/register',json={'username':member_name,'password':test_password,'qq_email':member_email})
+                response.raise_for_status()
+
+            async def fill(selector,value):
+                await evaluate("(() => {const field=document.querySelector("+json.dumps(selector)+");field.value="+json.dumps(value)+";field.dispatchEvent(new Event('input',{bubbles:true}))})()")
+
+            await evaluate("document.querySelector('.auth-switch').click()")
+            await wait_for("document.querySelector('.register-email') !== null")
+            await screenshot('registration-desktop.png')
+            await fill('input[autocomplete=username]',owner_name)
+            await fill('.register-email',owner_email)
+            await fill('input[autocomplete=new-password]',test_password)
+            await fill('.confirm-password',test_password)
+            await evaluate("document.querySelector('.auth-form').requestSubmit()")
+            await wait_for("document.querySelector('.auth-success')?.textContent.includes('注册成功')")
+            assert await evaluate("document.querySelector('input[type=password]').value===''")
+            await fill('input[autocomplete=current-password]',test_password)
+            await evaluate("document.querySelector('.auth-form').requestSubmit()")
+            await wait_for("document.querySelector('main[data-page=projects]') && !document.querySelector('header button.primary:disabled')")
+            assert await evaluate("document.querySelectorAll('.project-card').length===0"), 'Registration must not grant project access'
+            await evaluate("document.querySelector('.profile-button').click()")
+            await fill('.profile-form input','合成测试管理员')
+            await fill('.profile-form input[type=email]',updated_email)
+            await evaluate("document.querySelector('.profile-form').requestSubmit()")
+            await wait_for("!document.querySelector('.profile-form') && !document.querySelector('header button.primary:disabled')")
+            await evaluate("document.querySelector('header button.primary').click()")
+            await fill('.create-form input','账号与通讯录验收-'+suffix)
+            await fill('.create-form textarea','自动合成测试项目；邮箱为未验证测试别名，不发送邮件。')
+            await evaluate("document.querySelector('.create-form').requestSubmit()")
+            await wait_for("document.querySelectorAll('.project-card').length===1 && document.querySelector('.edit-project-button') && !document.querySelector('header button.primary:disabled')")
+            await evaluate("document.querySelector('.edit-project-button').click()")
+            renamed='已修改的合成项目-'+suffix
+            await fill('.edit-project-form input',renamed)
+            await fill('.edit-project-form textarea','通过浏览器修改的项目说明，保持成员与项目ID不变。')
+            await evaluate("document.querySelector('.edit-project-form').requestSubmit()")
+            await wait_for("document.querySelector('.project-card h2')?.textContent==="+json.dumps(renamed)+" && !document.querySelector('.edit-project-form')")
+            await fill('.member-form input',member_name)
+            await evaluate("document.querySelector('.member-form').requestSubmit()")
+            await wait_for("document.querySelectorAll('.members-table tbody tr').length===2 && !document.querySelector('header button.primary:disabled')")
+            await screenshot('project-edit-admin.png')
+            await evaluate("Array.from(document.querySelectorAll('button')).find(e=>e.textContent==='退出登录').click()")
+            await wait_for("document.querySelector('.login-card input[type=password]') !== null")
+            await fill('input[autocomplete=username]',member_name)
+            await fill('input[autocomplete=current-password]',test_password)
+            await evaluate("document.querySelector('.auth-form').requestSubmit()")
+            await wait_for("document.querySelectorAll('.members-table tbody tr').length===2 && !document.querySelector('header button.primary:disabled')")
+            assert await evaluate("!document.querySelector('.member-form') && !document.querySelector('.edit-project-button') && !document.querySelector('.members-table .danger-link')"), 'Member must only view contacts'
+            assert await evaluate("Array.from(document.querySelectorAll('.members-table a')).some(e=>e.getAttribute('href')==="+json.dumps('mailto:'+updated_email)+")"), 'Shared QQ mailto contact missing'
+            await screenshot('member-contacts-desktop.png')
+            await rpc('Emulation.setDeviceMetricsOverride', {'width':390,'height':844,'deviceScaleFactor':1,'mobile':True})
+            assert await evaluate('document.documentElement.scrollWidth <= 390'), 'Member contacts mobile overflow'
+            await screenshot('member-contacts-mobile.png')
+            await evaluate("Array.from(document.querySelectorAll('button')).find(e=>e.textContent==='退出登录').click()")
+            await wait_for("document.querySelector('.login-card input[type=password]') !== null")
+            await evaluate("document.querySelector('.auth-switch').click()")
+            await wait_for("document.querySelector('.register-email') !== null")
+            await screenshot('registration-mobile.png')
+            assert await evaluate('document.documentElement.scrollWidth <= 390'), 'Registration mobile overflow'
+            await evaluate("document.querySelector('.auth-switch').click()")
+            await rpc('Emulation.setDeviceMetricsOverride', {'width':1440,'height':1000,'deviceScaleFactor':1,'mobile':False})
+            print('PASS Chinese registration/login, own profile, project rename, Chinese member lookup, read-only contacts and QQ mailto on desktop/mobile; only synthetic accounts/projects created')
         records = json.loads((ROOT / '.local' / 'demo_accounts.json').read_text(encoding='utf-8'))
         accounts = {a['username']: a for a in records['accounts']}
         for username in ['demo_admin', 'demo_member', 'demo_other']:
@@ -247,7 +318,7 @@ async def main():
         await screenshot('login-mobile.png')
         assert await evaluate('document.documentElement.scrollWidth <= window.innerWidth'), 'Mobile horizontal overflow'
         print('PASS mobile login layout width; screenshots in .local/browser-check')
-        (output / 'result.json').write_text(json.dumps({'status': 'passed', 'users_checked': list(accounts), 'ingestion_checked':'--ingestion' in sys.argv, 'search_checked':'--search' in sys.argv, 'questions_checked':'--questions' in sys.argv, 'runtime_checked':'--runtime' in sys.argv,'centers_checked':'--centers' in sys.argv, 'checked_at': time.time()}, indent=2), encoding='utf-8')
+        (output / 'result.json').write_text(json.dumps({'status': 'passed', 'users_checked': list(accounts), 'ingestion_checked':'--ingestion' in sys.argv, 'search_checked':'--search' in sys.argv, 'questions_checked':'--questions' in sys.argv, 'runtime_checked':'--runtime' in sys.argv,'centers_checked':'--centers' in sys.argv,'accounts_checked':'--accounts' in sys.argv, 'checked_at': time.time()}, indent=2), encoding='utf-8')
         await rpc('Browser.close')
     finally:
         if session:

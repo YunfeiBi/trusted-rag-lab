@@ -32,6 +32,16 @@ const user = ref(null)
 const token = ref('')
 const username = ref('')
 const password = ref('')
+const authMode = ref('login')
+const registerEmail = ref('')
+const confirmPassword = ref('')
+const authNotice = ref('')
+const profileForm = ref(false)
+const profileName = ref('')
+const profileEmail = ref('')
+const editingProject = ref(false)
+const editName = ref('')
+const editDescription = ref('')
 const projects = ref([])
 const selected = ref(null)
 const members = ref([])
@@ -57,7 +67,7 @@ function goPage(name) {
 async function syncRoute() {
   const route = readRoute()
   page.value = route.page
-  error.value = ''; traceId.value = ''; projectForm.value = false
+  error.value = ''; traceId.value = ''; projectForm.value = false; editingProject.value = false
   if (user.value) {
     const project = projects.value.find(p=>p.id===route.project) || selected.value || projects.value[0] || null
     await run(() => selectProject(project))
@@ -68,6 +78,7 @@ async function syncRoute() {
 function reset() {
   token.value = ''; user.value = null; projects.value = []; selected.value = null; members.value = []
   password.value = ''; memberSearch.value = ''; projectForm.value = false
+  profileForm.value = false; editingProject.value = false; confirmPassword.value = ''; authMode.value = 'login'; authNotice.value = ''
   page.value = 'projects'; window.history.replaceState(null,'','#/projects')
 }
 
@@ -104,9 +115,50 @@ async function refreshProjects(preferred) {
 }
 
 async function selectProject(project) {
-  members.value = []; selected.value = project
+  members.value = []; selected.value = project; editingProject.value = false
   window.history.replaceState(null,'',pageUrl(page.value,project))
-  if (page.value==='projects' && project?.role === 'admin') members.value = await api(`/projects/${project.id}/members`)
+  if (page.value==='projects' && project) members.value = await api(`/projects/${project.id}/members`)
+}
+
+function switchAuth() {
+  authMode.value = authMode.value==='login'?'register':'login'
+  password.value = ''; confirmPassword.value = ''; error.value = ''; traceId.value = ''; authNotice.value = ''
+}
+
+function register() {
+  return run(async () => {
+    if (password.value !== confirmPassword.value) throw new Error('两次输入的密码不一致')
+    try {
+      const account = await api('/auth/register',{method:'POST',body:JSON.stringify({username:username.value,password:password.value,qq_email:registerEmail.value})})
+      username.value = account.username; registerEmail.value = ''; authMode.value = 'login'
+      authNotice.value = '注册成功，请登录。加入项目需要管理员添加你的用户名。'
+    } finally { password.value = ''; confirmPassword.value = '' }
+  })
+}
+
+function openProfile() {
+  profileName.value = user.value.display_name; profileEmail.value = user.value.qq_email || ''; profileForm.value = true
+}
+
+function saveProfile() {
+  return run(async () => {
+    user.value = await api('/auth/me',{method:'PATCH',body:JSON.stringify({display_name:profileName.value,qq_email:profileEmail.value})})
+    profileForm.value = false
+    await refreshProjects(selected.value?.id)
+  })
+}
+
+function editProject() {
+  editName.value = selected.value.name; editDescription.value = selected.value.description; editingProject.value = true
+}
+
+function saveProject() {
+  return run(async () => {
+    const id = selected.value.id
+    await api('/projects/'+id,{method:'PATCH',body:JSON.stringify({name:editName.value,description:editDescription.value})})
+    await refreshProjects(id)
+    editingProject.value = false
+  })
 }
 
 function switchProject(event) {
@@ -173,14 +225,18 @@ onUnmounted(() => window.removeEventListener('hashchange',syncRoute))
       <p class="stage-note">七个独立板块连接项目、资料、检索、问答、任务、评测与运行审计。</p>
     </section>
     <section class="login-card">
-      <p class="eyebrow">WELCOME BACK</p><h2>进入工作空间</h2><p class="muted">使用本机已创建的账号登录。</p>
-      <form @submit.prevent="login">
-        <label>用户名<input v-model="username" required maxlength="64" autocomplete="username" placeholder="输入用户名"></label>
-        <label>密码<input v-model="password" type="password" required maxlength="128" autocomplete="current-password" placeholder="输入密码"></label>
+      <p class="eyebrow">{{ authMode==='register'?'CREATE ACCOUNT':'WELCOME BACK' }}</p><h2>{{ authMode==='register'?'注册账号':'进入工作空间' }}</h2><p class="muted">{{ authMode==='register'?'使用中文或英文用户名建立你的账号。':'使用已注册账号登录。' }}</p>
+      <p v-if="authNotice" class="auth-success" role="status">{{ authNotice }}</p>
+      <form class="auth-form" @submit.prevent="authMode==='register'?register():login()">
+        <label>用户名<input v-model="username" required maxlength="64" autocomplete="username" placeholder="支持中文、英文、数字及_.-"></label>
+        <label v-if="authMode==='register'">QQ邮箱<input v-model="registerEmail" class="register-email" type="email" required maxlength="80" autocomplete="email" placeholder="例如：你的QQ号@qq.com"></label>
+        <label>密码<input v-model="password" type="password" required :minlength="authMode==='register'?8:1" maxlength="128" :autocomplete="authMode==='register'?'new-password':'current-password'" :placeholder="authMode==='register'?'8—128位密码':'输入密码'"></label>
+        <label v-if="authMode==='register'">确认密码<input v-model="confirmPassword" class="confirm-password" type="password" required minlength="8" maxlength="128" autocomplete="new-password" placeholder="再次输入密码"></label>
+        <p v-if="authMode==='register'" class="hint">QQ邮箱将对同项目成员展示，方便联系。当前不发送验证邮件，请填写你自己的有效邮箱。</p>
         <div v-if="error" class="error" role="alert">{{ error }}<small v-if="traceId">追踪编号：{{ traceId }}</small></div>
-        <button class="primary full" :disabled="busy">{{ busy ? '正在登录…' : '登录工作空间 →' }}</button>
+        <button class="primary full" :disabled="busy">{{ busy ? '正在提交…' : authMode==='register'?'注册账号':'登录工作空间 →' }}</button>
       </form>
-      <p class="hint">演示账号由本地初始化工具创建，密码见项目启动说明中的本地账号文件。</p>
+      <button class="auth-switch" :disabled="busy" @click="switchAuth">{{ authMode==='register'?'已有账号？返回登录':'还没有账号？注册账号' }}</button>
       <div class="service-status"><span :class="['dot', { green: serviceReady }]" />{{ serviceReady === null ? '检查服务中…' : serviceReady ? '本机服务已就绪' : '后端尚未就绪，请检查启动状态' }}</div>
     </section>
   </div>
@@ -189,13 +245,14 @@ onUnmounted(() => window.removeEventListener('hashchange',syncRoute))
       <div class="brand workspace-brand"><img :src="emblem" alt="重庆邮电大学校徽" class="sidebar-emblem"><div>知序<small>重庆邮电大学 · 课程项目</small></div></div>
       <p class="sidebar-label">工作空间</p>
       <nav class="desktop-nav" aria-label="主导航"><button v-for="item in pages" :key="item.id" :data-nav="item.id" :class="['nav-link',{ 'nav-active':page===item.id }]" :aria-current="page===item.id ? 'page' : undefined" :disabled="busy" @click="goPage(item.id)">{{ item.icon }}　{{ item.title }}</button></nav>
-      <div class="sidebar-bottom"><strong>{{ user.display_name }}</strong><span>{{ user.username }}</span><button class="ghost" :disabled="busy" @click="logout">退出登录</button></div>
+      <div class="sidebar-bottom"><strong>{{ user.display_name }}</strong><span>{{ user.username }}</span><button class="ghost profile-button" :disabled="busy" @click="openProfile">个人资料</button><button class="ghost" :disabled="busy" @click="logout">退出登录</button></div>
     </aside>
     <main :data-page="page">
       <header><div><p class="eyebrow">{{ currentPage.eyebrow }}</p><h1>{{ currentPage.heading }}</h1><p class="muted">{{ currentPage.description }}</p></div><button v-if="page==='projects'" class="primary" :disabled="busy" @click="projectForm = !projectForm">＋ 创建项目</button><button v-else class="ghost" :disabled="busy" @click="run(() => refreshProjects(selected?.id))">刷新项目</button></header>
-      <div class="mobile-session"><span class="mobile-identity"><img :src="emblem" alt="重庆邮电大学校徽">{{ user.display_name }}</span><button class="ghost" :disabled="busy" @click="logout">退出登录</button></div>
+      <div class="mobile-session"><span class="mobile-identity"><img :src="emblem" alt="重庆邮电大学校徽">{{ user.display_name }}</span><div class="mobile-account-actions"><button class="ghost" :disabled="busy" @click="openProfile">个人资料</button><button class="ghost" :disabled="busy" @click="logout">退出登录</button></div></div>
       <nav class="mobile-navigation" aria-label="移动导航"><button v-for="item in pages" :key="item.id" :data-mobile-nav="item.id" :class="{active:page===item.id}" :disabled="busy" @click="goPage(item.id)">{{ item.title }}</button></nav>
       <div v-if="error" class="error" role="alert">{{ error }}<small v-if="traceId">追踪编号：{{ traceId }}</small></div>
+      <form v-if="profileForm" class="panel profile-form" @submit.prevent="saveProfile"><h2>个人资料</h2><p class="muted">用户名：{{ user.username }}。显示名称和QQ邮箱会出现在你加入项目的成员通讯录。</p><label>显示名称<input v-model="profileName" required maxlength="100"></label><label>QQ邮箱<input v-model="profileEmail" type="email" required maxlength="80" placeholder="你的QQ邮箱@qq.com"></label><p class="hint">邮箱由本人填写，尚未通过邮件验证。已有账号未填写时，通讯录显示“未填写”。</p><div class="actions"><button type="button" class="ghost" @click="profileForm=false">取消</button><button class="primary" :disabled="busy">保存个人资料</button></div></form>
       <div v-if="page !== 'projects' && selected" class="project-context"><label>当前项目<select class="project-selector" :value="selected.id" :disabled="busy" @change="switchProject"><option v-for="project in projects" :key="project.id" :value="project.id">{{ project.name }}</option></select></label><span :class="['badge',{admin:isAdmin}]">{{ isAdmin ? '项目管理员' : '项目成员' }}</span></div>
       <template v-if="page==='projects'">
       <form v-if="projectForm" class="panel create-form" @submit.prevent="createProject">
@@ -211,14 +268,16 @@ onUnmounted(() => window.removeEventListener('hashchange',syncRoute))
         </button>
       </section>
       <section v-if="selected" class="panel">
-        <div class="section-heading"><div><p class="eyebrow">ACCESS & MEMBERS</p><h2>{{ selected.name }} · 项目访问</h2></div><button class="ghost" :disabled="busy" @click="run(() => refreshProjects(selected.id))">刷新</button></div>
-        <p v-if="!isAdmin" class="muted">你是本项目成员，成员管理由管理员负责。可通过导航进入资料、检索和问答页面。</p>
-        <template v-else>
+        <div class="section-heading"><div><p class="eyebrow">ACCESS & MEMBERS</p><h2>{{ selected.name }} · 项目成员</h2></div><div class="project-actions"><button v-if="isAdmin" class="ghost edit-project-button" :disabled="busy" @click="editProject">编辑项目</button><button class="ghost" :disabled="busy" @click="run(() => refreshProjects(selected.id))">刷新</button></div></div>
+        <form v-if="isAdmin&&editingProject" class="edit-project-form" @submit.prevent="saveProject"><label>项目名称<input v-model="editName" required maxlength="100"></label><label>项目说明<textarea v-model="editDescription" maxlength="2000" rows="3"></textarea></label><div class="actions"><button type="button" class="ghost" @click="editingProject=false">取消</button><button class="primary" :disabled="busy">保存项目</button></div></form>
+        <p v-if="!isAdmin" class="muted">你可以查看本项目成员与联系邮箱，成员和项目设置由管理员维护。</p>
+        <template v-if="isAdmin">
           <p class="muted">添加已存在的本机账号。撤销成员后，其现有会话也将失去本项目访问权限。</p>
           <form class="member-form" @submit.prevent="addMember"><label>精确用户名<input v-model="memberSearch" required maxlength="64" placeholder="例如 demo_member"></label><label>项目角色<select v-model="memberRole"><option value="member">成员</option><option value="admin">管理员</option></select></label><button class="primary" :disabled="busy">添加 / 更新</button></form>
-          <div class="table-wrap"><table><thead><tr><th>成员</th><th>用户名</th><th>项目角色</th><th>操作</th></tr></thead><tbody><tr v-for="member in members" :key="member.user.id"><td>{{ member.user.display_name }} <small v-if="member.user.id === user.id">（你）</small></td><td>{{ member.user.username }}</td><td><span :class="['badge', { admin: member.role === 'admin' }]">{{ member.role === 'admin' ? '管理员' : '成员' }}</span></td><td><button class="danger-link" :disabled="busy" @click="removeMember(member)">撤销访问</button></td></tr></tbody></table></div>
-          <p class="hint">系统会保护最后一位管理员。请先添加另一位管理员，再撤销或降级原管理员。</p>
         </template>
+        <div class="table-wrap"><table class="members-table"><thead><tr><th>成员</th><th>用户名</th><th>QQ邮箱</th><th>项目角色</th><th v-if="isAdmin">操作</th></tr></thead><tbody><tr v-for="member in members" :key="member.user.id"><td data-label="成员">{{ member.user.display_name }} <small v-if="member.user.id===user.id">（你）</small></td><td data-label="用户名">{{ member.user.username }}</td><td data-label="QQ邮箱"><a v-if="member.user.qq_email" :href="'mailto:'+member.user.qq_email">{{ member.user.qq_email }}</a><span v-else class="muted">未填写</span></td><td data-label="项目角色"><span :class="['badge',{admin:member.role==='admin'}]">{{ member.role==='admin'?'管理员':'成员' }}</span></td><td v-if="isAdmin" data-label="操作"><button class="danger-link" :disabled="busy" @click="removeMember(member)">撤销访问</button></td></tr></tbody></table></div>
+        <p class="hint">联系邮箱由成员本人填写，未验证邮箱归属；点击邮箱会打开本机邮件应用，系统不会自动发送邮件。</p>
+        <p v-if="isAdmin" class="hint">系统会保护最后一位管理员。请先添加另一位管理员，再撤销或降级原管理员。</p>
       </section>
       </template>
       <template v-else-if="selected">
@@ -236,6 +295,7 @@ onUnmounted(() => window.removeEventListener('hashchange',syncRoute))
 </template>
 
 <style>
+.auth-switch{display:block;margin:20px auto 0;border:0;background:none;color:#476890;font-size:13px;padding:8px}.auth-success{padding:12px 15px;border:1px solid #d5e5db;background:#f3faf6;border-radius:7px;color:#4d7b63;font-size:12px}.project-actions,.mobile-account-actions{display:flex;gap:8px;flex-shrink:0}.edit-project-form{padding:20px;background:#f7f9fc;border:1px solid #e2e9f1;border-radius:8px;margin:20px 0}.members-table a{color:#476b96}.profile-form{max-width:700px}.mobile-account-actions button{padding:8px;font-size:11px}@media(max-width:600px){.members-table{min-width:620px}.project-actions{flex-wrap:wrap;justify-content:flex-end}.project-actions button{font-size:11px;padding:8px}}
 :root{font-family:Inter,"Segoe UI","Microsoft YaHei",sans-serif;color:#233343;background:#f5f6f8;font-synthesis:none;font-size:14px}*{box-sizing:border-box}body{margin:0}button,input,textarea,select{font:inherit}button{cursor:pointer}button:disabled{cursor:wait;opacity:.65}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:3px solid #acbdec;outline-offset:2px}button{transition:background .15s,box-shadow .15s}h1,h2,p{margin-top:0}h1{font-size:32px;letter-spacing:-1px;margin-bottom:12px}h2{font-size:19px;margin-bottom:12px}p{line-height:1.8}small{font-size:12px}.brand{display:flex;align-items:center;gap:10px;font-size:23px;font-weight:750;letter-spacing:2px}.brand small{font-weight:400;font-size:12px;letter-spacing:0;color:#6c7b8c}.brand-icon{display:grid;place-items:center;width:36px;height:36px;color:white;background:#344f78;border-radius:10px;font-size:20px}.eyebrow{font-size:11px;font-weight:700;letter-spacing:2px;color:#6b7e97;margin-bottom:12px}.muted{color:#6d7b8c}.hint{font-size:12px;line-height:1.8;color:#788595;margin:18px 0 0}.primary{border:0;border-radius:7px;background:#344f78;color:white;padding:12px 18px;font-weight:600}.primary:hover{background:#253e63}.full{width:100%;margin-top:8px}.ghost{border:1px solid #dce1e7;background:white;padding:9px 14px;border-radius:7px;color:#53647b}.ghost:hover{background:#f4f6f9}.login-shell{min-height:100vh;display:grid;grid-template-columns:1.2fr 1fr;align-items:center;gap:70px;max-width:1180px;padding:70px 50px;margin:auto}.intro .brand{margin-bottom:78px}.intro h1{font-size:43px;line-height:1.45;letter-spacing:-1.5px}.intro-text{max-width:440px;color:#6a7a8c;font-size:15px}.principles{display:flex;gap:24px;margin-top:35px;color:#47607c;font-size:12px}.stage-note{font-size:12px;margin-top:55px;color:#8590a0}.login-card{background:white;border:1px solid #e4e7ed;border-radius:16px;padding:40px;box-shadow:0 15px 60px #26395208}.login-card h2{font-size:25px}.login-card form{margin-top:30px}label{display:block;font-size:12px;font-weight:600;color:#526176;margin-bottom:18px}input,textarea,select{display:block;width:100%;margin-top:8px;border:1px solid #d9dfe7;border-radius:7px;padding:12px;background:white;color:#233343}input::placeholder,textarea::placeholder{color:#9aa4b1}textarea{resize:vertical}.service-status{border-top:1px solid #edf0f4;margin-top:26px;padding-top:19px;font-size:12px;color:#7c8796;display:flex;align-items:center;gap:8px}.dot{height:7px;width:7px;border-radius:50%;background:#c89448}.dot.green{background:#5b9e80}.error{border:1px solid #f1d4d1;background:#fff4f2;color:#9f4037;padding:12px 16px;border-radius:7px;line-height:1.7;margin-bottom:20px}.error small{display:block;overflow-wrap:anywhere}.workspace{min-height:100vh;display:grid;grid-template-columns:225px 1fr}.workspace aside{background:#fff;border-right:1px solid #e5e8ed;padding:30px 20px;display:flex;flex-direction:column}.workspace aside .brand{padding-left:12px}.sidebar-label{font-size:11px;color:#97a0ad;letter-spacing:2px;margin:48px 14px 16px}.nav-active,.nav-future{padding:14px;border-radius:7px;font-size:13px;margin-bottom:8px}.nav-active{background:#edf1f7;color:#344f78;font-weight:700}.nav-future{color:#98a1af}.nav-future small{font-size:10px;margin-left:8px}.sidebar-bottom{margin-top:auto;padding:55px 14px 0;display:flex;flex-direction:column;gap:8px}.sidebar-bottom span{color:#8792a2;font-size:12px}.sidebar-bottom button{margin-top:12px}.workspace main{padding:48px 50px;max-width:1350px;width:100%;margin:auto}header,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:24px}header{margin-bottom:24px}.project-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:20px;margin-bottom:30px}.project-card{border:1px solid #e1e5eb;background:white;border-radius:11px;padding:24px;text-align:left;color:inherit}.project-card:hover{box-shadow:0 6px 22px #2333430b}.project-card.selected{border:1px solid #6382ac;box-shadow:0 0 0 2px #6382ac16}.card-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}.folder{color:#607c9f;font-size:30px}.badge{border-radius:5px;background:#f0f2f5;padding:5px 9px;font-size:11px;color:#798698}.badge.admin{background:#edf2fa;color:#4b6c99}.project-card h2{font-size:18px}.project-card p{color:#7a8795;min-height:48px;font-size:12px;overflow-wrap:anywhere}.card-bottom{font-size:11px;color:#6d809a}.panel{background:white;border:1px solid #e1e5eb;padding:27px;border-radius:11px;margin-bottom:25px}.panel .section-heading h2{margin-bottom:10px}.member-form{display:grid;grid-template-columns:1fr 155px auto;gap:16px;align-items:end;margin:24px 0}.member-form label{margin:0}.member-form button{height:44px}.table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px;white-space:nowrap}th,td{text-align:left;padding:16px 12px;border-bottom:1px solid #edf0f4}th{background:#f9fafc;color:#8b97a6;font-size:11px;font-weight:500}.danger-link{border:0;background:transparent;color:#a95e56;font-size:12px;padding:5px 0}.actions{display:flex;justify-content:flex-end;gap:12px}.empty{text-align:center;padding:45px}footer{font-size:11px;color:#9aa3af;margin-top:35px;line-height:1.8}@media(max-width:900px){.login-shell{grid-template-columns:1fr;max-width:550px;gap:30px;padding:35px 20px}.intro .brand{margin-bottom:32px}.intro h1{font-size:30px}.principles,.stage-note{display:none}.workspace{grid-template-columns:1fr}.workspace aside{display:none}.workspace main{padding:28px 18px}.member-form{grid-template-columns:1fr}.login-card{padding:28px}header{align-items:flex-start}header h1{font-size:27px}}
 </style>
 <style>
@@ -244,6 +304,8 @@ onUnmounted(() => window.removeEventListener('hashchange',syncRoute))
 <style>
 .university-lockup{display:flex;align-items:center;gap:17px;margin-bottom:32px}.university-emblem{width:72px;height:72px;object-fit:contain}.university-lockup strong{display:block;font-size:19px;letter-spacing:3px;color:#365f4e}.university-lockup span{display:block;font-size:11px;color:#829287;margin-top:9px;letter-spacing:1px}.intro .brand{margin-bottom:40px!important}.sidebar-emblem{width:42px;height:48px;object-fit:contain;flex-shrink:0}.workspace-brand{gap:10px!important;padding-left:2px!important}.workspace-brand small{display:block;font-size:9px!important;letter-spacing:0;margin-top:7px;white-space:nowrap}.mobile-identity{display:flex;align-items:center;gap:10px}.mobile-identity img{width:28px;height:32px;object-fit:contain}.desktop-nav{gap:3px!important}.desktop-nav .nav-link{padding:12px 14px}.sidebar-label{margin-top:30px!important}.mobile-navigation{flex-wrap:wrap!important;overflow:visible!important}.mobile-navigation button{flex:1 0 auto}@media(max-width:650px){.university-lockup{margin-bottom:24px}.university-emblem{width:54px;height:54px}.university-lockup strong{font-size:16px}.intro .brand{margin-bottom:24px!important}}
 .mobile-session { display: none; }
+.sidebar-bottom strong,.sidebar-bottom span,.project-card h2,.section-heading h2{overflow-wrap:anywhere}.section-heading>div:first-child{min-width:0}.mobile-identity{min-width:0;word-break:break-all;flex:1}
+@media(max-width:600px){.members-table{min-width:0!important;white-space:normal}.members-table thead{display:none}.members-table tbody,.members-table tbody tr,.members-table td{display:block;width:100%}.members-table tbody tr{padding:12px 16px;margin:12px 0;border:1px solid #e4eaf1;border-radius:8px}.members-table td{padding:8px 0;border:0;overflow-wrap:anywhere;white-space:normal}.members-table td::before{content:attr(data-label);display:block;font-size:10px;color:#96a2b0;margin-bottom:7px}.members-table a{overflow-wrap:anywhere}}
 header > button { flex-shrink: 0; white-space: nowrap; }
 .nav-library { border: 0; background: transparent; color: #53647b; text-align: left; padding: 14px; font-size: 13px; border-radius: 7px; }
 .nav-library:hover { background: #f4f6f9; }

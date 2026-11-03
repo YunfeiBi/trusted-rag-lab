@@ -58,7 +58,7 @@ def test_project_scope_and_member_management_denial(environment):
     assert client.get('/api/projects', headers=outsider).json() == []
     assert client.get(path, headers=outsider).status_code == 404
     assert client.get(path, headers=member).json()['role'] == 'member'
-    assert client.get(path+'/members', headers=member).status_code == 403
+    assert client.get(path+'/members', headers=member).status_code == 200
     assert client.put(path+'/members/'+ids['outsider'], headers=member, json={'role': 'admin'}).status_code == 403
     assert client.get('/api/users?username=owner', headers=member).status_code == 403
 
