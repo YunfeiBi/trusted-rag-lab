@@ -22,7 +22,9 @@ def main():
             auth[username] = headers
             cleanup.callback(lambda h=headers: client.post('/auth/logout', headers=h))
         name = '引用问答验收（合成资料）-'+uuid.uuid4().hex[:6]
-        response = client.post('/projects', headers=auth['demo_admin'], json={'name': name, 'description': '自动生成的纯合成资料，仅用于本机引用问答验收。'})
+        team_response=client.get('/teams',headers=auth['demo_admin']);team_response.raise_for_status()
+        assert team_response.json(),'Demo account needs approved team membership'
+        response = client.post('/projects', headers=auth['demo_admin'], json={'name': name, 'description': '自动生成的纯合成资料，仅用于本机引用问答验收。','team_id':team_response.json()[0]['id']})
         response.raise_for_status()
         project_id = response.json()['id']
         documents = []

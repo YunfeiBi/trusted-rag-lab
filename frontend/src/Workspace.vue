@@ -6,11 +6,12 @@ import QuestionPanel from './QuestionPanel.vue'
 import TaskCenter from './TaskCenter.vue'
 import EvaluationCenter from './EvaluationCenter.vue'
 import RuntimeCenter from './RuntimeCenter.vue'
+import TeamWorkspace from './TeamWorkspace.vue'
 import emblem from './assets/cqupt-emblem.webp'
 import './centers.css'
 
 const pages = [
-  { id:'projects', title:'项目管理', heading:'我的项目', eyebrow:'PROJECT WORKSPACE', icon:'▦', description:'选择项目并管理成员访问权限。' },
+  { id:'projects', title:'团队与项目', heading:'团队与项目', eyebrow:'TEAM WORKSPACE', icon:'▦', description:'加入实验团队，在获授权的项目范围内协作。' },
   { id:'documents', title:'资料与版本', heading:'资料与版本', eyebrow:'DOCUMENT LIBRARY', icon:'▤', description:'管理当前项目的资料、处理任务和历史版本。' },
   { id:'search', title:'证据检索', heading:'证据检索', eyebrow:'EVIDENCE SEARCH', icon:'⌕', description:'从当前项目的可用资料中检索和核对证据。' },
   { id:'questions', title:'知识问答', heading:'知识问答', eyebrow:'GROUNDED ANSWERS', icon:'◉', description:'依据项目资料回答问题，并查看引用与个人历史。' },
@@ -34,15 +35,22 @@ const username = ref('')
 const password = ref('')
 const authMode = ref('login')
 const registerEmail = ref('')
+const registerIdentity = ref('student')
 const confirmPassword = ref('')
 const authNotice = ref('')
 const profileForm = ref(false)
 const profileName = ref('')
 const profileEmail = ref('')
+const profileIdentity = ref('')
 const editingProject = ref(false)
 const editName = ref('')
 const editDescription = ref('')
 const projects = ref([])
+const teams = ref([])
+const activeTeamId = ref('')
+const activeTeam = computed(()=>teams.value.find(t=>t.id===activeTeamId.value)||null)
+const scopeProjects = computed(()=>projects.value.filter(p=>p.team_id===activeTeamId.value))
+const visibleProjects = computed(()=>scopeProjects.value.filter(p=>!p.is_team_library))
 const selected = ref(null)
 const members = ref([])
 const busy = ref(false)
@@ -77,6 +85,7 @@ async function syncRoute() {
 
 function reset() {
   token.value = ''; user.value = null; projects.value = []; selected.value = null; members.value = []
+  teams.value=[];activeTeamId.value=''
   password.value = ''; memberSearch.value = ''; projectForm.value = false
   profileForm.value = false; editingProject.value = false; confirmPassword.value = ''; authMode.value = 'login'; authNotice.value = ''
   page.value = 'projects'; window.history.replaceState(null,'','#/projects')
@@ -108,14 +117,22 @@ async function run(action) {
   finally { busy.value = false }
 }
 
-async function refreshProjects(preferred) {
-  projects.value = await api('/projects')
-  const project = projects.value.find(p => p.id === (preferred || readRoute().project)) || projects.value[0] || null
+async function refreshProjects(preferred,preferredTeam) {
+  teams.value = await api('/teams')
+  projects.value = await api('/projects?include_libraries=true')
+  const requested=projects.value.find(p=>p.id===(preferred||readRoute().project))
+  activeTeamId.value=(teams.value.some(t=>t.id===preferredTeam)?preferredTeam:null) || requested?.team_id || (teams.value.some(t=>t.id===activeTeamId.value)?activeTeamId.value:teams.value[0]?.id||'')
+  const project = (requested?.team_id===activeTeamId.value?requested:null) || scopeProjects.value.find(p=>!p.is_team_library) || scopeProjects.value[0] || null
   await selectProject(project)
 }
 
+function teamChanged(id){return run(()=>refreshProjects(null,id||activeTeamId.value))}
+function teamCreated(id){return run(()=>refreshProjects(null,id))}
+function openLibrary(id){return run(async()=>{await selectProject(projects.value.find(p=>p.id===id));goPage('documents')})}
+
 async function selectProject(project) {
   members.value = []; selected.value = project; editingProject.value = false
+  if(project)activeTeamId.value=project.team_id
   window.history.replaceState(null,'',pageUrl(page.value,project))
   if (page.value==='projects' && project) members.value = await api(`/projects/${project.id}/members`)
 }
@@ -129,20 +146,20 @@ function register() {
   return run(async () => {
     if (password.value !== confirmPassword.value) throw new Error('两次输入的密码不一致')
     try {
-      const account = await api('/auth/register',{method:'POST',body:JSON.stringify({username:username.value,password:password.value,qq_email:registerEmail.value})})
+      const account = await api('/auth/register',{method:'POST',body:JSON.stringify({username:username.value,password:password.value,qq_email:registerEmail.value,academic_identity:registerIdentity.value})})
       username.value = account.username; registerEmail.value = ''; authMode.value = 'login'
-      authNotice.value = '注册成功，请登录。加入项目需要管理员添加你的用户名。'
+      authNotice.value = '注册成功，请登录后申请加入团队。教师身份需确认后才能创建团队。'
     } finally { password.value = ''; confirmPassword.value = '' }
   })
 }
 
 function openProfile() {
-  profileName.value = user.value.display_name; profileEmail.value = user.value.qq_email || ''; profileForm.value = true
+  profileName.value = user.value.display_name; profileEmail.value = user.value.qq_email || ''; profileIdentity.value=['teacher','student'].includes(user.value.academic_identity)?user.value.academic_identity:''; profileForm.value = true
 }
 
 function saveProfile() {
   return run(async () => {
-    user.value = await api('/auth/me',{method:'PATCH',body:JSON.stringify({display_name:profileName.value,qq_email:profileEmail.value})})
+    user.value = await api('/auth/me',{method:'PATCH',body:JSON.stringify({display_name:profileName.value,qq_email:profileEmail.value,academic_identity:profileIdentity.value})})
     profileForm.value = false
     await refreshProjects(selected.value?.id)
   })
@@ -181,7 +198,8 @@ function logout() {
 
 function createProject() {
   return run(async () => {
-    const result = await api('/projects', { method: 'POST', body: JSON.stringify({ name: name.value, description: description.value }) })
+    if(!activeTeam.value)throw new Error('请先加入团队，或由已确认教师创建团队。')
+    const result = await api('/projects', { method: 'POST', body: JSON.stringify({ name: name.value, description: description.value,team_id:activeTeam.value.id }) })
     projectForm.value = false; name.value = ''; description.value = ''
     await refreshProjects(result.id)
   })
@@ -190,7 +208,7 @@ function createProject() {
 function addMember() {
   return run(async () => {
     const found = await api('/users?username=' + encodeURIComponent(memberSearch.value.trim()))
-    if (!found.length) throw new Error('未找到该账号，请确认已通过本地工具创建')
+    if (!found.length) throw new Error('未找到该账号，请确认其已注册并填写准确用户名')
     await api(`/projects/${selected.value.id}/members/${found[0].id}`, { method: 'PUT', body: JSON.stringify({ role: memberRole.value }) })
     memberSearch.value = ''
     await refreshProjects(selected.value.id)
@@ -230,9 +248,10 @@ onUnmounted(() => window.removeEventListener('hashchange',syncRoute))
       <form class="auth-form" @submit.prevent="authMode==='register'?register():login()">
         <label>用户名<input v-model="username" required maxlength="64" autocomplete="username" placeholder="支持中文、英文、数字及_.-"></label>
         <label v-if="authMode==='register'">QQ邮箱<input v-model="registerEmail" class="register-email" type="email" required maxlength="80" autocomplete="email" placeholder="例如：你的QQ号@qq.com"></label>
+        <label v-if="authMode==='register'">成员身份<select v-model="registerIdentity" class="register-identity"><option value="student">学生</option><option value="teacher">教师（需确认身份）</option></select></label>
         <label>密码<input v-model="password" type="password" required :minlength="authMode==='register'?8:1" maxlength="128" :autocomplete="authMode==='register'?'new-password':'current-password'" :placeholder="authMode==='register'?'8—128位密码':'输入密码'"></label>
         <label v-if="authMode==='register'">确认密码<input v-model="confirmPassword" class="confirm-password" type="password" required minlength="8" maxlength="128" autocomplete="new-password" placeholder="再次输入密码"></label>
-        <p v-if="authMode==='register'" class="hint">QQ邮箱将对同项目成员展示，方便联系。当前不发送验证邮件，请填写你自己的有效邮箱。</p>
+        <p v-if="authMode==='register'" class="hint">QQ邮箱会用于团队入组审批及师生通讯录，当前不发送验证邮件。学生不能创建团队，自行选择教师也需本机管理员确认身份。</p>
         <div v-if="error" class="error" role="alert">{{ error }}<small v-if="traceId">追踪编号：{{ traceId }}</small></div>
         <button class="primary full" :disabled="busy">{{ busy ? '正在提交…' : authMode==='register'?'注册账号':'登录工作空间 →' }}</button>
       </form>
@@ -248,26 +267,27 @@ onUnmounted(() => window.removeEventListener('hashchange',syncRoute))
       <div class="sidebar-bottom"><strong>{{ user.display_name }}</strong><span>{{ user.username }}</span><button class="ghost profile-button" :disabled="busy" @click="openProfile">个人资料</button><button class="ghost" :disabled="busy" @click="logout">退出登录</button></div>
     </aside>
     <main :data-page="page">
-      <header><div><p class="eyebrow">{{ currentPage.eyebrow }}</p><h1>{{ currentPage.heading }}</h1><p class="muted">{{ currentPage.description }}</p></div><button v-if="page==='projects'" class="primary" :disabled="busy" @click="projectForm = !projectForm">＋ 创建项目</button><button v-else class="ghost" :disabled="busy" @click="run(() => refreshProjects(selected?.id))">刷新项目</button></header>
+      <header><div><p class="eyebrow">{{ currentPage.eyebrow }}</p><h1>{{ currentPage.heading }}</h1><p class="muted">{{ currentPage.description }}</p></div><button v-if="page==='projects'" class="primary" :disabled="busy||!activeTeam" @click="projectForm = !projectForm">＋ 创建项目</button><button v-else class="ghost" :disabled="busy" @click="run(() => refreshProjects(selected?.id))">刷新项目</button></header>
       <div class="mobile-session"><span class="mobile-identity"><img :src="emblem" alt="重庆邮电大学校徽">{{ user.display_name }}</span><div class="mobile-account-actions"><button class="ghost" :disabled="busy" @click="openProfile">个人资料</button><button class="ghost" :disabled="busy" @click="logout">退出登录</button></div></div>
       <nav class="mobile-navigation" aria-label="移动导航"><button v-for="item in pages" :key="item.id" :data-mobile-nav="item.id" :class="{active:page===item.id}" :disabled="busy" @click="goPage(item.id)">{{ item.title }}</button></nav>
       <div v-if="error" class="error" role="alert">{{ error }}<small v-if="traceId">追踪编号：{{ traceId }}</small></div>
-      <form v-if="profileForm" class="panel profile-form" @submit.prevent="saveProfile"><h2>个人资料</h2><p class="muted">用户名：{{ user.username }}。显示名称和QQ邮箱会出现在你加入项目的成员通讯录。</p><label>显示名称<input v-model="profileName" required maxlength="100"></label><label>QQ邮箱<input v-model="profileEmail" type="email" required maxlength="80" placeholder="你的QQ邮箱@qq.com"></label><p class="hint">邮箱由本人填写，尚未通过邮件验证。已有账号未填写时，通讯录显示“未填写”。</p><div class="actions"><button type="button" class="ghost" @click="profileForm=false">取消</button><button class="primary" :disabled="busy">保存个人资料</button></div></form>
-      <div v-if="page !== 'projects' && selected" class="project-context"><label>当前项目<select class="project-selector" :value="selected.id" :disabled="busy" @change="switchProject"><option v-for="project in projects" :key="project.id" :value="project.id">{{ project.name }}</option></select></label><span :class="['badge',{admin:isAdmin}]">{{ isAdmin ? '项目管理员' : '项目成员' }}</span></div>
+      <form v-if="profileForm" class="panel profile-form" @submit.prevent="saveProfile"><h2>个人资料</h2><p class="muted">用户名：{{ user.username }}。显示名称和QQ邮箱会出现在所属团队与项目的通讯录中。</p><p class="hint">身份：{{ user.teacher_verified?'教师（已确认）':user.academic_identity==='teacher'?'教师身份待本机管理员确认':user.academic_identity==='student'?'学生':'身份待补充' }}</p><label>成员身份<select v-model="profileIdentity" required :disabled="user.teacher_verified"><option value="" disabled>请选择你的身份</option><option value="student">学生</option><option value="teacher">教师（需本机管理员确认）</option></select></label><label>显示名称<input v-model="profileName" required maxlength="100"></label><label>QQ邮箱<input v-model="profileEmail" type="email" required maxlength="80" placeholder="你的QQ邮箱@qq.com"></label><p class="hint">邮箱由本人填写，尚未通过邮件验证。已有账号未填写时，通讯录显示“未填写”。</p><div class="actions"><button type="button" class="ghost" @click="profileForm=false">取消</button><button class="primary" :disabled="busy">保存个人资料</button></div></form>
+      <div v-if="page !== 'projects' && selected" class="project-context"><label>{{ activeTeam?.name }} · 当前资料范围<select class="project-selector" :value="selected.id" :disabled="busy" @change="switchProject"><option v-for="project in scopeProjects" :key="project.id" :value="project.id">{{ project.name }}{{ project.is_team_library?'（全团队公共）':'' }}</option></select></label><span :class="['badge',{admin:isAdmin}]">{{ isAdmin ? '资料管理员' : '只读成员' }}</span></div>
       <template v-if="page==='projects'">
+      <TeamWorkspace :teams="teams" :active="activeTeam" :user="user" :api="api" @select="teamChanged" @changed="teamChanged()" @created="teamCreated" @library="openLibrary" />
       <form v-if="projectForm" class="panel create-form" @submit.prevent="createProject">
         <h2>创建项目空间</h2><label>项目名称<input v-model="name" required maxlength="100" placeholder="例如：软件体系结构研究"></label>
         <label>项目说明<textarea v-model="description" maxlength="2000" rows="2" placeholder="介绍项目用途和资料范围" /></label>
         <div class="actions"><button type="button" class="ghost" @click="projectForm = false">取消</button><button class="primary" :disabled="busy">创建并进入</button></div>
       </form>
-      <div v-if="!projects.length && !busy" class="panel empty"><h2>还没有可访问的项目</h2><p class="muted">创建一个项目，或请项目管理员添加你的账号。</p></div>
+      <div v-if="activeTeam&&!visibleProjects.length&&!busy" class="panel empty"><h2>当前团队暂无你参与的内部项目</h2><p class="muted">你可以先访问团队公共资料；内部项目需由项目管理员授权，也可以在当前团队创建自己的项目。</p></div>
       <section class="project-grid" aria-label="项目列表">
-        <button v-for="project in projects" :key="project.id" :class="['project-card', { selected: selected?.id === project.id }]" :disabled="busy" @click="run(() => selectProject(project))">
+        <button v-for="project in visibleProjects" :key="project.id" :class="['project-card', { selected: selected?.id === project.id }]" :disabled="busy" @click="run(() => selectProject(project))">
           <div class="card-top"><span class="folder">▱</span><span :class="['badge', { admin: project.role === 'admin' }]">{{ project.role === 'admin' ? '管理员' : '成员' }}</span></div>
           <h2>{{ project.name }}</h2><p>{{ project.description || '暂无项目说明' }}</p><span class="card-bottom">{{ selected?.id === project.id ? '当前项目' : '查看项目' }} →</span>
         </button>
       </section>
-      <section v-if="selected" class="panel">
+      <section v-if="selected&&!selected.is_team_library" class="panel">
         <div class="section-heading"><div><p class="eyebrow">ACCESS & MEMBERS</p><h2>{{ selected.name }} · 项目成员</h2></div><div class="project-actions"><button v-if="isAdmin" class="ghost edit-project-button" :disabled="busy" @click="editProject">编辑项目</button><button class="ghost" :disabled="busy" @click="run(() => refreshProjects(selected.id))">刷新</button></div></div>
         <form v-if="isAdmin&&editingProject" class="edit-project-form" @submit.prevent="saveProject"><label>项目名称<input v-model="editName" required maxlength="100"></label><label>项目说明<textarea v-model="editDescription" maxlength="2000" rows="3"></textarea></label><div class="actions"><button type="button" class="ghost" @click="editingProject=false">取消</button><button class="primary" :disabled="busy">保存项目</button></div></form>
         <p v-if="!isAdmin" class="muted">你可以查看本项目成员与联系邮箱，成员和项目设置由管理员维护。</p>

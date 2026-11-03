@@ -7,7 +7,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from backend.app.config import ROOT, Settings
-from backend.app.models import Membership, Project, User
+from backend.app.models import Membership, Project, Team, TeamMembership, User
 from backend.app.security import hash_password
 
 
@@ -35,7 +35,17 @@ def main():
             project_id = records['projects'].get(label)
             project = db.get(Project, uuid.UUID(project_id)) if project_id else None
             if project is None:
-                project = Project(name=name, description='课程本机演示项目，当前为基础权限功能')
+                team=Team(name=name+'（演示团队）',description='初始化合成演示团队，不代表教师身份确认。',code=secrets.token_hex(6).upper())
+                db.add(team);db.flush()
+                db.add(TeamMembership(team_id=team.id,user_id=users[owner].id,role='owner'))
+                if label=='a':
+                    db.add(TeamMembership(team_id=team.id,user_id=users['demo_member'].id,role='member'))
+                public=Project(name='团队公共资料',description='演示团队公共资料',team_id=team.id,is_team_library=True)
+                db.add(public);db.flush()
+                db.add(Membership(project_id=public.id,user_id=users[owner].id,role='admin'))
+                if label=='a':
+                    db.add(Membership(project_id=public.id,user_id=users['demo_member'].id,role='member'))
+                project = Project(name=name, description='课程本机演示项目，当前为基础权限功能',team_id=team.id)
                 db.add(project)
                 db.flush()
                 db.add(Membership(project_id=project.id, user_id=users[owner].id, role='admin'))

@@ -16,7 +16,7 @@ from sqlalchemy import Float, cast, func, literal_column, select
 
 from .dependencies import CurrentUser, Db, bearer
 from .ingestion import IngestionError
-from .models import Chunk, Document, DocumentVersion, LoginSession, Membership, StoredVector, User, utcnow
+from .models import Chunk, Document, DocumentVersion, LoginSession, Membership, Project, StoredVector, TeamMembership, User, utcnow
 from .security import token_digest
 
 router = APIRouter(prefix='/api')
@@ -47,7 +47,7 @@ class EvidenceValidationInput(BaseModel):
 
 
 def check_access(db, project_id, user_id, session_hash=None):
-    query = select(Membership.user_id).join(User, User.id == Membership.user_id).where(
+    query = select(Membership.user_id).join(User, User.id == Membership.user_id).join(Project,Project.id==Membership.project_id).join(TeamMembership,(TeamMembership.team_id==Project.team_id)&(TeamMembership.user_id==User.id)).where(
         Membership.project_id == project_id, Membership.user_id == user_id, User.is_active.is_(True))
     if session_hash:
         query = query.join(LoginSession,LoginSession.user_id == User.id).where(LoginSession.token_hash == session_hash,LoginSession.expires_at > utcnow())
@@ -63,7 +63,7 @@ def authorized_scope(project_id, user_id):
         Document.id.label('document_id'), Document.title, DocumentVersion.number.label('version_number'),
         DocumentVersion.filename, DocumentVersion.embedding_model,
     ).join(DocumentVersion, DocumentVersion.id == Chunk.version_id).join(Document, Document.id == DocumentVersion.document_id).join(
-        Membership, Membership.project_id == Document.project_id).join(User, User.id == Membership.user_id).where(
+        Membership, Membership.project_id == Document.project_id).join(User, User.id == Membership.user_id).join(Project,Project.id==Document.project_id).join(TeamMembership,(TeamMembership.team_id==Project.team_id)&(TeamMembership.user_id==User.id)).where(
         Document.project_id == project_id, Membership.user_id == user_id, User.is_active.is_(True),
         Document.is_active.is_(True), Document.current_version_id == DocumentVersion.id,
         DocumentVersion.status == 'ready',

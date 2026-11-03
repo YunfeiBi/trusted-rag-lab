@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.config import ROOT, Settings
 from backend.app.main import create_app
-from backend.app.models import Membership, Project, User
+from backend.app.models import Membership, Project, Team, TeamMembership, User
 from backend.app.security import hash_password
 
 
@@ -41,12 +41,23 @@ def environment(hashes, tmp_path):
             users = [User(username=n, display_name=n, password_hash=hashes) for n in ['owner', 'member', 'outsider']]
             db.add_all(users)
             db.flush()
-            project = Project(name='Protected project')
+            team=Team(name='Protected team',code='PROTECTED001')
+            other=Team(name='Other team',code='OTHERTEAM001')
+            db.add_all([team,other]);db.flush()
+            db.add_all([TeamMembership(team_id=team.id,user_id=users[0].id,role='owner'),TeamMembership(team_id=team.id,user_id=users[1].id,role='member'),TeamMembership(team_id=other.id,user_id=users[2].id,role='owner')])
+            users[0].academic_identity='teacher';users[0].teacher_verified=True
+            project = Project(name='Protected project',team_id=team.id)
             db.add(project)
             db.flush()
+            public=Project(name='Public team library',team_id=team.id,is_team_library=True)
+            other_public=Project(name='Other public library',team_id=other.id,is_team_library=True)
+            db.add_all([public,other_public]);db.flush()
+            db.add_all([Membership(project_id=public.id,user_id=users[0].id,role='admin'),Membership(project_id=public.id,user_id=users[1].id,role='member'),Membership(project_id=other_public.id,user_id=users[2].id,role='admin')])
             db.add_all([Membership(project_id=project.id, user_id=users[0].id, role='admin'), Membership(project_id=project.id, user_id=users[1].id, role='member')])
             ids = {u.username: str(u.id) for u in users}
             ids['project'] = str(project.id)
+            ids['team']=str(team.id)
+            ids['library']=str(public.id)
         app = create_app(settings, engine)
         with TestClient(app) as client:
             yield client, engine, ids

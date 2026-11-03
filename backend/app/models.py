@@ -21,6 +21,8 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(64), unique=True)
     display_name: Mapped[str] = mapped_column(String(100))
     qq_email: Mapped[str | None] = mapped_column(String(80),unique=True)
+    academic_identity: Mapped[str] = mapped_column(String(16),default='unspecified')
+    teacher_verified: Mapped[bool] = mapped_column(Boolean,default=False)
     password_hash: Mapped[str] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -38,6 +40,8 @@ class Project(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(100))
     description: Mapped[str] = mapped_column(Text, default='')
+    team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('teams.id'),index=True)
+    is_team_library: Mapped[bool] = mapped_column(Boolean,default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -47,6 +51,38 @@ class Membership(Base):
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), primary_key=True)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('app_users.id', ondelete='CASCADE'), primary_key=True)
     role: Mapped[str] = mapped_column(String(16))
+
+
+class Team(Base):
+    __tablename__='teams'
+    id: Mapped[uuid.UUID] = mapped_column(Uuid,primary_key=True,default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100))
+    description: Mapped[str] = mapped_column(Text,default='')
+    code: Mapped[str] = mapped_column(String(16),unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),default=utcnow)
+
+
+class TeamMembership(Base):
+    __tablename__='team_memberships'
+    __table_args__=(CheckConstraint("role IN ('owner','admin','member')",name='ck_team_role'),)
+    team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('teams.id'),primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('app_users.id'),primary_key=True)
+    role: Mapped[str] = mapped_column(String(16))
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),default=utcnow)
+
+
+class TeamApplication(Base):
+    __tablename__='team_applications'
+    __table_args__=(UniqueConstraint('team_id','user_id',name='uq_team_applicant'),CheckConstraint("status IN ('pending','approved','rejected','cancelled')",name='ck_application_status'))
+    id: Mapped[uuid.UUID] = mapped_column(Uuid,primary_key=True,default=uuid.uuid4)
+    team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('teams.id'),index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('app_users.id'))
+    message: Mapped[str] = mapped_column(Text,default='')
+    status: Mapped[str] = mapped_column(String(16),default='pending')
+    review_note: Mapped[str] = mapped_column(Text,default='')
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('app_users.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),default=utcnow)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class StoredVector(Vector):

@@ -141,7 +141,7 @@ onUnmounted(() => { alive = false; clearInterval(timer); clearSource(); pdfPassw
 
 <template>
   <section id="document-library" class="panel document-library">
-    <div class="section-heading"><div><p class="eyebrow">DOCUMENTS & VERSIONS</p><h2>项目资料库</h2></div><button class="ghost" :disabled="busy" @click="run(load)">刷新资料</button></div>
+    <div class="section-heading"><div><p class="eyebrow">DOCUMENTS & VERSIONS</p><h2>{{ project.is_team_library?'团队公共资料库':'项目资料库' }}</h2></div><button class="ghost" :disabled="busy" @click="run(load)">刷新资料</button></div>
     <p class="muted">上传、处理与版本记录在这里汇总。新版本完成后生效，构建期间继续使用原有可用版本。</p>
     <div v-if="error" class="error" role="alert">{{ error }}<small v-if="errorTrace">追踪编号：{{ errorTrace }}</small></div>
     <p v-if="uploadNotice" class="hint" role="status">{{ uploadNotice }}</p>
@@ -155,7 +155,7 @@ onUnmounted(() => { alive = false; clearInterval(timer); clearSource(); pdfPassw
       <label class="consent"><input v-model="consent" type="checkbox" required>我有权上传此资料，允许将提取文本发送至已配置的向量服务。</label>
       <button class="primary" :disabled="busy || !file || !consent">{{ busy ? '正在提交…' : target ? '提交新版本' : '上传并入库' }}</button>
     </form>
-    <p v-else class="hint">当前为普通成员，可查看本项目资料。上传和版本维护由项目管理员负责。</p>
+    <p v-else class="hint">{{ project.is_team_library?'团队公共资料对已批准成员开放，上传和版本维护由团队管理员负责。':'当前为普通成员，可查看本项目资料。上传和版本维护由项目管理员负责。' }}</p>
     <div v-if="!documents.length" class="docs-empty">暂无可查看资料。{{ admin ? '上传一份公开或获授权资料开始。' : '请联系项目管理员添加资料。' }}</div>
     <div v-else class="table-wrap"><table class="documents-table"><thead><tr><th>资料</th><th>最新版本与处理</th><th>当前可用</th><th>操作</th></tr></thead><tbody>
       <tr v-for="doc in documents" :key="doc.id">

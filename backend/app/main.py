@@ -23,6 +23,7 @@ from .questions import router as questions_router
 from .runtime import router as runtime_router
 from .evaluation import router as evaluation_router
 from .upload_limit import UploadBodyLimit
+from .teams import router as teams_router
 
 logger = logging.getLogger('trusted_rag.requests')
 logger.setLevel(logging.INFO)
@@ -93,6 +94,7 @@ def create_app(settings=None, engine=None):
     application.include_router(questions_router)
     application.include_router(runtime_router)
     application.include_router(evaluation_router)
+    application.include_router(teams_router)
     application.add_middleware(UploadBodyLimit,max_bytes=settings.max_upload_bytes)
     return application
 

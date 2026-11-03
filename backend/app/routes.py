@@ -8,8 +8,8 @@ from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
-from .dependencies import CurrentUser, Db, bearer, require_membership
-from .models import LoginSession, Membership, Project, User, utcnow
+from .dependencies import CurrentUser, Db, bearer, require_membership, require_team
+from .models import LoginSession, Membership, Project, TeamMembership, User, utcnow
 from .schemas import ContactUserOutput, LoginInput, LoginOutput, MemberInput, MemberOutput, ProfileInput, ProjectInput, ProjectOutput, ProjectUpdate, RegisterInput, UserOutput, normalize_username
 from .security import DUMMY_HASH, hash_password, token_digest, verify_password
 from .audit import record_event
@@ -45,7 +45,7 @@ def login(data: LoginInput, db: Db, request: Request):
 
 @router.post('/auth/register',response_model=ContactUserOutput,status_code=201)
 def register(data:RegisterInput,db:Db):
-    user=User(username=data.username,display_name=data.username,qq_email=data.qq_email,password_hash=hash_password(data.password))
+    user=User(username=data.username,display_name=data.username,qq_email=data.qq_email,academic_identity=data.academic_identity,teacher_verified=False,password_hash=hash_password(data.password))
     db.add(user)
     try:
         db.commit()
@@ -62,6 +62,10 @@ def me(user: CurrentUser):
 
 @router.patch('/auth/me',response_model=ContactUserOutput)
 def update_profile(data:ProfileInput,user:CurrentUser,db:Db):
+    if data.academic_identity:
+        if user.teacher_verified and data.academic_identity!='teacher':
+            raise HTTPException(409,'已确认教师身份需由本机管理员处理，不能自行改为学生。')
+        user.academic_identity=data.academic_identity
     user.display_name,user.qq_email=data.display_name,data.qq_email
     try:
         db.commit()
@@ -79,18 +83,31 @@ def logout(user: CurrentUser, db: Db, credentials: Annotated[HTTPAuthorizationCr
 
 
 def project_output(project, membership):
-    return ProjectOutput(id=project.id, name=project.name, description=project.description, role=membership.role)
+    return ProjectOutput(id=project.id, name=project.name, description=project.description, role=membership.role,team_id=project.team_id,is_team_library=project.is_team_library)
 
 
 @router.get('/projects', response_model=list[ProjectOutput])
-def list_projects(user: CurrentUser, db: Db):
-    rows = db.execute(select(Project, Membership).join(Membership).where(Membership.user_id == user.id).order_by(Project.created_at))
+def list_projects(user: CurrentUser, db: Db,team_id:UUID|None=None,include_libraries:bool=False):
+    query=select(Project, Membership).join(Membership).join(TeamMembership,(TeamMembership.team_id==Project.team_id)&(TeamMembership.user_id==Membership.user_id)).where(Membership.user_id == user.id)
+    if team_id:
+        require_team(db,team_id,user.id)
+        query=query.where(Project.team_id==team_id)
+    if not include_libraries:
+        query=query.where(Project.is_team_library.is_(False))
+    rows = db.execute(query.order_by(Project.created_at))
     return [project_output(p, m) for p, m in rows]
 
 
 @router.post('/projects', response_model=ProjectOutput, status_code=201)
 def create_project(data: ProjectInput, user: CurrentUser, db: Db, request:Request):
-    project = Project(**data.model_dump())
+    team_id=data.team_id
+    if team_id is None:
+        teams=db.scalars(select(TeamMembership.team_id).where(TeamMembership.user_id==user.id)).all()
+        if len(teams)!=1:
+            raise HTTPException(422,'请先加入或创建团队，并明确选择项目所属团队。')
+        team_id=teams[0]
+    require_team(db,team_id,user.id,lock=True)
+    project = Project(**data.model_dump(exclude={'team_id'}),team_id=team_id)
     db.add(project)
     db.flush()
     membership = Membership(project_id=project.id, user_id=user.id, role='admin')
@@ -109,6 +126,8 @@ def read_project(project_id: UUID, user: CurrentUser, db: Db):
 @router.patch('/projects/{project_id}',response_model=ProjectOutput)
 def update_project(project_id:UUID,data:ProjectUpdate,user:CurrentUser,db:Db,request:Request):
     project,membership=require_membership(db,project_id,user.id,admin=True,lock=True)
+    if project.is_team_library:
+        raise HTTPException(409,'团队公共资料库由团队设置维护，不能作为普通项目修改。')
     for field,value in data.model_dump(exclude_unset=True).items():
         setattr(project,field,value)
     record_event(db,project_id,user.id,'project.updated',project_id,request.state.trace_id)
@@ -132,10 +151,14 @@ def protect_last_admin(db, project_id, target, new_role):
 
 @router.put('/projects/{project_id}/members/{user_id}', response_model=MemberOutput)
 def put_member(project_id: UUID, user_id: UUID, data: MemberInput, user: CurrentUser, db: Db, request:Request):
-    require_membership(db, project_id, user.id, admin=True, lock=True)
+    project,_=require_membership(db, project_id, user.id, admin=True, lock=True)
+    if project.is_team_library:
+        raise HTTPException(409,'公共资料库成员随团队审批同步，请在团队成员中管理。')
     target_user = db.get(User, user_id)
     if not target_user or not target_user.is_active:
         raise HTTPException(404, '用户不存在或已禁用')
+    if db.get(TeamMembership,(project.team_id,user_id)) is None:
+        raise HTTPException(409,'该用户尚未加入当前团队，请先完成入组审批。')
     membership = db.get(Membership, (project_id, user_id))
     protect_last_admin(db, project_id, membership, data.role)
     if membership:
@@ -149,7 +172,9 @@ def put_member(project_id: UUID, user_id: UUID, data: MemberInput, user: Current
 
 @router.delete('/projects/{project_id}/members/{user_id}', status_code=204)
 def delete_member(project_id: UUID, user_id: UUID, user: CurrentUser, db: Db, request:Request):
-    require_membership(db, project_id, user.id, admin=True, lock=True)
+    project,_=require_membership(db, project_id, user.id, admin=True, lock=True)
+    if project.is_team_library:
+        raise HTTPException(409,'公共资料库成员随团队同步，请在团队成员中管理。')
     target = db.get(Membership, (project_id, user_id))
     if target is None:
         raise HTTPException(404, '成员不存在')

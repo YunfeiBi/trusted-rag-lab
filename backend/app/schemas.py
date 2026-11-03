@@ -33,6 +33,7 @@ class LoginInput(BaseModel):
 class RegisterInput(LoginInput):
     password: str = Field(min_length=8,max_length=128,repr=False)
     qq_email: str = Field(max_length=80)
+    academic_identity: Literal['teacher','student'] = 'student'
     _qq_email = field_validator('qq_email')(normalize_qq_email)
 
 
@@ -40,6 +41,7 @@ class ProfileInput(BaseModel):
     model_config=ConfigDict(extra='forbid',str_strip_whitespace=True)
     display_name: str = Field(min_length=1,max_length=100)
     qq_email: str = Field(max_length=80)
+    academic_identity: Literal['student','teacher'] | None = None
     _qq_email = field_validator('qq_email')(normalize_qq_email)
 
 
@@ -52,6 +54,8 @@ class UserOutput(BaseModel):
 
 class ContactUserOutput(UserOutput):
     qq_email: str | None = None
+    academic_identity: str = 'unspecified'
+    teacher_verified: bool = False
 
 
 class LoginOutput(BaseModel):
@@ -65,6 +69,7 @@ class ProjectInput(BaseModel):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
     name: str = Field(min_length=1, max_length=100)
     description: str = Field(default='', max_length=2000)
+    team_id: UUID | None = None
 
 
 class ProjectOutput(BaseModel):
@@ -72,6 +77,8 @@ class ProjectOutput(BaseModel):
     name: str
     description: str
     role: Literal['admin', 'member']
+    team_id: UUID
+    is_team_library: bool
 
 
 class ProjectUpdate(BaseModel):

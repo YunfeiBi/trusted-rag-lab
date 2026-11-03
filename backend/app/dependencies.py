@@ -6,7 +6,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import LoginSession, Membership, Project, User, utcnow
+from .models import LoginSession, Membership, Project, Team, TeamMembership, User, utcnow
 from .security import token_digest
 
 bearer = HTTPBearer(auto_error=False)
@@ -35,8 +35,27 @@ def current_user(db: Db, credentials: Annotated[HTTPAuthorizationCredentials | N
 CurrentUser = Annotated[User, Depends(current_user)]
 
 
+def require_team(db,team_id,user_id,*,admin=False,owner=False,lock=False):
+    query=select(Team).where(Team.id==team_id)
+    if lock:
+        query=query.with_for_update().execution_options(populate_existing=True)
+    team=db.scalar(query)
+    member=db.scalar(select(TeamMembership).where(TeamMembership.team_id==team_id,TeamMembership.user_id==user_id).execution_options(populate_existing=True)) if team else None
+    if member is None:
+        raise HTTPException(404,'团队不存在或你尚未获得团队访问权限')
+    if owner and member.role!='owner':
+        raise HTTPException(403,'需要团队所有者权限')
+    if admin and member.role not in {'owner','admin'}:
+        raise HTTPException(403,'需要团队管理员权限')
+    return team,member
+
+
 def require_membership(db: Session, project_id: UUID, user_id: UUID, admin=False, lock=False):
     # Mutations lock the project before reading membership to serialize admin changes.
+    snapshot=db.get(Project,project_id)
+    if snapshot is None:
+        raise HTTPException(404,'项目不存在或不可访问')
+    require_team(db,snapshot.team_id,user_id,lock=lock)
     query = select(Project).where(Project.id == project_id)
     if lock:
         query = query.with_for_update()

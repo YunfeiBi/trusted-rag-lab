@@ -103,17 +103,57 @@ async def main():
             await screenshot('registration-desktop.png')
             await fill('input[autocomplete=username]',owner_name)
             await fill('.register-email',owner_email)
+            await evaluate("(() => {const field=document.querySelector('.register-identity');field.value='teacher';field.dispatchEvent(new Event('change',{bubbles:true}))})()")
             await fill('input[autocomplete=new-password]',test_password)
             await fill('.confirm-password',test_password)
             await evaluate("document.querySelector('.auth-form').requestSubmit()")
             await wait_for("document.querySelector('.auth-success')?.textContent.includes('注册成功')")
             assert await evaluate("document.querySelector('input[type=password]').value===''")
+            # Test fixture only: confirm this freshly created synthetic teacher;
+            # never alter demo accounts or infer any real person's identity.
+            subprocess.run([str(ROOT/'.venv/Scripts/python.exe'),'-m','backend.teacher_accounts','approve',owner_name],cwd=ROOT,check=True,stdout=subprocess.DEVNULL)
             await fill('input[autocomplete=current-password]',test_password)
             await evaluate("document.querySelector('.auth-form').requestSubmit()")
-            await wait_for("document.querySelector('main[data-page=projects]') && !document.querySelector('header button.primary:disabled')")
+            await wait_for("document.querySelector('main[data-page=projects]') && document.querySelector('.team-create-form') && !document.querySelector('[data-nav=projects]:disabled')")
             assert await evaluate("document.querySelectorAll('.project-card').length===0"), 'Registration must not grant project access'
+            await fill('.team-create-form input','浏览器合成实验团队-'+suffix)
+            await fill('.team-create-form textarea','模拟教师/学生组织测试，不代表真实教师身份或真实团队。')
+            await evaluate("document.querySelector('.team-create-form').requestSubmit()")
+            await wait_for("document.querySelector('.team-code') !== null && !document.querySelector('header button.primary:disabled')")
+            team_code=await evaluate("document.querySelector('.team-code').textContent")
+            with httpx.Client(base_url='http://127.0.0.1:8000/api',timeout=10) as client:
+                auth=client.post('/auth/login',json={'username':member_name,'password':test_password});auth.raise_for_status()
+                member_headers={'Authorization':'Bearer '+auth.json()['access_token']}
+                try:
+                    assert client.post('/teams',headers=member_headers,json={'name':'student cannot create'}).status_code==403
+                finally:
+                    client.post('/auth/logout',headers=member_headers)
+            await evaluate("Array.from(document.querySelectorAll('button')).find(e=>e.textContent==='退出登录').click()")
+            await wait_for("document.querySelector('.login-card input[type=password]') !== null")
+            await fill('input[autocomplete=username]',member_name)
+            await fill('input[autocomplete=current-password]',test_password)
+            await evaluate("document.querySelector('.auth-form').requestSubmit()")
+            await wait_for("document.querySelector('.team-apply-form') && !document.querySelector('[data-nav=projects]:disabled')")
+            assert await evaluate("!document.querySelector('.team-create-form') && !document.querySelector('.team-library-button')")
+            await fill('.team-apply-form input',team_code)
+            await fill('.team-apply-form textarea','浏览器合成学生申请，非真实人员。')
+            await evaluate("document.querySelector('.team-apply-form').requestSubmit()")
+            await wait_for("document.querySelector('.own-applications')?.textContent.includes('待审批')")
+            await screenshot('team-student-pending.png')
+            await evaluate("Array.from(document.querySelectorAll('button')).find(e=>e.textContent==='退出登录').click()")
+            await wait_for("document.querySelector('.login-card input[type=password]') !== null")
+            await fill('input[autocomplete=username]',owner_name)
+            await fill('input[autocomplete=current-password]',test_password)
+            await evaluate("document.querySelector('.auth-form').requestSubmit()")
+            await wait_for("document.querySelector('.team-code') && !document.querySelector('[data-nav=projects]:disabled')")
+            await evaluate("Array.from(document.querySelectorAll('.team-workspace button')).find(e=>e.textContent==='刷新团队').click()")
+            await wait_for("Array.from(document.querySelectorAll('.team-review button')).some(e=>e.textContent==='批准加入')")
+            await screenshot('team-approval-desktop.png')
+            await evaluate("Array.from(document.querySelectorAll('.team-review button')).find(e=>e.textContent==='批准加入').click()")
+            await wait_for("document.querySelectorAll('.team-person').length===2")
+            await screenshot('team-members-desktop.png')
             await evaluate("document.querySelector('.profile-button').click()")
-            await fill('.profile-form input','合成测试管理员')
+            await fill('.profile-form input','合成教师（测试账号）')
             await fill('.profile-form input[type=email]',updated_email)
             await evaluate("document.querySelector('.profile-form').requestSubmit()")
             await wait_for("!document.querySelector('.profile-form') && !document.querySelector('header button.primary:disabled')")
@@ -140,6 +180,16 @@ async def main():
             await wait_for("document.querySelectorAll('.members-table tbody tr').length===2 && !document.querySelector('header button.primary:disabled')")
             assert await evaluate("!document.querySelector('.member-form') && !document.querySelector('.edit-project-button') && !document.querySelector('.members-table .danger-link')"), 'Member must only view contacts'
             assert await evaluate("Array.from(document.querySelectorAll('.members-table a')).some(e=>e.getAttribute('href')==="+json.dumps('mailto:'+updated_email)+")"), 'Shared QQ mailto contact missing'
+            await wait_for("document.querySelectorAll('.team-person').length===2")
+            assert await evaluate("document.querySelector('.team-create-form')===null"), 'Students must not get a team creation form'
+            await evaluate("document.querySelector('.team-library-button').click()")
+            await wait_for("document.querySelector('#document-library') && !document.querySelector('[data-nav=projects]:disabled')")
+            assert await evaluate("document.querySelector('.project-selector').selectedOptions[0].textContent.includes('全团队公共') && !document.querySelector('.upload-area')"), 'Student public library must be read only'
+            await screenshot('team-public-library.png')
+            await evaluate("document.querySelector('[data-nav=projects]').click()")
+            await wait_for("document.querySelector('.project-card') && !document.querySelector('[data-nav=projects]:disabled')")
+            await evaluate("document.querySelector('.project-card').click()")
+            await wait_for("document.querySelectorAll('.members-table tbody tr').length===2")
             await screenshot('member-contacts-desktop.png')
             await rpc('Emulation.setDeviceMetricsOverride', {'width':390,'height':844,'deviceScaleFactor':1,'mobile':True})
             assert await evaluate('document.documentElement.scrollWidth <= 390'), 'Member contacts mobile overflow'
@@ -152,7 +202,7 @@ async def main():
             assert await evaluate('document.documentElement.scrollWidth <= 390'), 'Registration mobile overflow'
             await evaluate("document.querySelector('.auth-switch').click()")
             await rpc('Emulation.setDeviceMetricsOverride', {'width':1440,'height':1000,'deviceScaleFactor':1,'mobile':False})
-            print('PASS Chinese registration/login, own profile, project rename, Chinese member lookup, read-only contacts and QQ mailto on desktop/mobile; only synthetic accounts/projects created')
+            print('PASS synthetic teacher confirmation, teacher-only creation, student application/approval, public/private project roles, registration, contacts and mobile layout')
         records = json.loads((ROOT / '.local' / 'demo_accounts.json').read_text(encoding='utf-8'))
         accounts = {a['username']: a for a in records['accounts']}
         for username in ['demo_admin', 'demo_member', 'demo_other']:
@@ -164,20 +214,29 @@ async def main():
                 try:
                     project_response = api_client.get('/projects',headers=api_headers)
                     project_response.raise_for_status()
-                    expected = [p['name'] for p in project_response.json()]
+                    expected_projects = project_response.json()
                 finally:
                     api_client.post('/auth/logout',headers=api_headers)
             await evaluate("(() => {const u=document.querySelector('input[autocomplete=username]');const p=document.querySelector('input[type=password]');u.value=" + json.dumps(username) + ";u.dispatchEvent(new Event('input',{bubbles:true}));p.value=" + json.dumps(account['password']) + ";p.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('form').requestSubmit();return true})()")
-            await wait_for("document.querySelector('h1')?.textContent === '我的项目' && document.querySelectorAll('.project-card').length > 0 && !document.querySelector('header button.primary:disabled')")
+            await wait_for("document.querySelector('h1')?.textContent === '团队与项目' && document.querySelectorAll('.project-card').length > 0 && !document.querySelector('header button.primary:disabled')")
+            active_team=await evaluate("document.querySelector('.team-selector').value")
+            expected=[p['name'] for p in expected_projects if p['team_id']==active_team]
             names = await evaluate("Array.from(document.querySelectorAll('.project-card h2')).map(e=>e.textContent)")
             assert names == expected, 'UI project scope differs from server-authorized projects'
             if username == 'demo_member':
                 assert await evaluate("document.querySelector('.member-form') === null"), 'Member management exposed'
             await screenshot(username + '.png')
             assert await evaluate("document.querySelectorAll('[data-nav]').length===7 && document.querySelector('.sidebar-emblem')?.naturalWidth>0"), 'Seven pages or university emblem missing'
+
+            async def select_project(project_name):
+                target_project=next(p for p in expected_projects if p['name']==project_name)
+                await evaluate("(() => {const field=document.querySelector('.team-selector');field.value="+json.dumps(target_project['team_id'])+";field.dispatchEvent(new Event('change',{bubbles:true}))})()")
+                await wait_for("Array.from(document.querySelectorAll('.project-card h2')).some(e=>e.textContent==="+json.dumps(project_name)+") && !document.querySelector('[data-nav=projects]:disabled')")
+                await evaluate("Array.from(document.querySelectorAll('.project-card')).find(e=>e.querySelector('h2').textContent==="+json.dumps(project_name)+").click()")
+                await wait_for("!document.querySelector('[data-nav=projects]:disabled')")
             if username == 'demo_admin' and '--centers' in sys.argv:
                 report=json.loads((ROOT/'.local/centers-live-check.json').read_text(encoding='utf-8'))
-                await evaluate("Array.from(document.querySelectorAll('.project-card')).find(e=>e.querySelector('h2').textContent==="+json.dumps(report['project_name'])+").click()")
+                await select_project(report['project_name'])
                 await wait_for("!document.querySelector('[data-nav=documents]:disabled')")
                 await evaluate("document.querySelector('[data-nav=documents]').click()")
                 await wait_for("document.querySelector('.pdf-password') !== null && document.querySelectorAll('.documents-table tbody tr').length===2")
@@ -263,7 +322,7 @@ async def main():
                 search_report = json.loads((ROOT / '.local' / 'search-live-check.json').read_text(encoding='utf-8'))
                 await evaluate("document.querySelector('[data-nav=projects]').click()")
                 await wait_for("document.querySelector('.project-card') !== null && !document.querySelector('[data-nav=projects]:disabled')")
-                await evaluate("(() => {const card=Array.from(document.querySelectorAll('.project-card')).find(e=>e.querySelector('h2').textContent==="+json.dumps(search_report['project_name'])+");if(!card)throw new Error('Synthetic search project not found');card.click()})()")
+                await select_project(search_report['project_name'])
                 await wait_for("!document.querySelector('[data-nav=search]:disabled')")
                 await evaluate("document.querySelector('[data-nav=search]').click()")
                 await wait_for("document.querySelector('#evidence-search .muted')?.textContent.includes("+json.dumps(search_report['project_name'])+")")
@@ -288,7 +347,7 @@ async def main():
                 report = json.loads((ROOT / '.local/qa-live-check.json').read_text(encoding='utf-8'))
                 await evaluate("document.querySelector('[data-nav=projects]').click()")
                 await wait_for("document.querySelector('.project-card') !== null && !document.querySelector('[data-nav=projects]:disabled')")
-                await evaluate("Array.from(document.querySelectorAll('.project-card')).find(e=>e.querySelector('h2').textContent==="+json.dumps(report['project_name'])+").click()")
+                await select_project(report['project_name'])
                 await wait_for("!document.querySelector('[data-nav=questions]:disabled')")
                 await evaluate("document.querySelector('[data-nav=questions]').click()")
                 await wait_for("document.querySelector('.question-form') !== null && document.querySelectorAll('.history-item').length>=2")

@@ -34,7 +34,9 @@ def main():
         headers={'Authorization':'Bearer '+auth.json()['access_token']}
         try:
             name='七板块与PDF验收（合成资料）-'+uuid.uuid4().hex[:6]
-            response=client.post('/projects',headers=headers,json={'name':name,'description':'纯合成测试；包含AES密码PDF和超过20MB附件PDF，不代表正式人工评测。'})
+            team_response=client.get('/teams',headers=headers);team_response.raise_for_status()
+            assert team_response.json(),'Demo account needs approved team membership'
+            response=client.post('/projects',headers=headers,json={'name':name,'description':'纯合成测试；包含AES密码PDF和超过20MB附件PDF，不代表正式人工评测。','team_id':team_response.json()[0]['id']})
             response.raise_for_status()
             project=response.json()['id']
             local=ROOT/'.local/centers-check'
