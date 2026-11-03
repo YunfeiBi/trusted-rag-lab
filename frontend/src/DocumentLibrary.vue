@@ -4,6 +4,8 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 const props = defineProps({ project: { type: Object, required: true }, api: { type: Function, required: true } })
 const documents = ref([])
 const error = ref('')
+const errorTrace = ref('')
+const runtime = ref(null)
 const busy = ref(false)
 const file = ref(null)
 const fileInput = ref(null)
@@ -23,6 +25,7 @@ let polling = false
 const admin = computed(() => props.project.role === 'admin')
 const statuses = { queued: '等待处理', processing: '处理中', ready: '已就绪', failed: '处理失败', cancelled: '已取消', succeeded: '已完成' }
 const stages = { queued: '等待 Worker', parsing: '解析与分块', embedding: '生成向量', publishing: '发布索引', done: '入库完成', failed: '失败', cancelled: '取消' }
+function localTime(value) { return new Date(value).toLocaleString('zh-CN', {hour12:false}) }
 const reasons = { INVALID_UTF8: 'Markdown 需使用 UTF-8 编码', NO_TEXT: '未提取到文字，扫描件需另做 OCR', INVALID_PDF: 'PDF 无法解析', ENCRYPTED_PDF: '不支持加密 PDF', TEXT_TOO_LARGE: '提取文本超过20万字符', TOO_MANY_PAGES: 'PDF 超过200页', PDF_PAGE_TOO_LARGE: 'PDF 单页内容流过大', EMBEDDING_UNAVAILABLE: '向量服务暂不可用', EMBEDDING_HTTP_ERROR: '向量服务返回错误', EMBEDDING_INVALID_RESPONSE: '向量返回格式或维度不匹配', MODEL_NOT_CONFIGURED: '向量服务未配置', LEASE_EXHAUSTED: 'Worker 多次超时，可手动重试', FILE_NOT_FOUND: '原文件不存在', FILE_CHANGED: '原文件校验失败' }
 
 function clearSource() {
@@ -38,6 +41,9 @@ async function load() {
   const result = await props.api(`/projects/${props.project.id}/documents`)
   if (!alive) return
   documents.value = result
+  const status = await props.api(`/projects/${props.project.id}/ingestion-status`)
+  if (!alive) return
+  runtime.value = status
   if (selectedDocument.value && !result.some(d => d.id === selectedDocument.value.id && d.is_active)) clearDetails()
   if (selectedDocument.value) {
     const id = selectedDocument.value.id
@@ -48,8 +54,8 @@ async function load() {
 
 async function run(action) {
   if (busy.value) return
-  busy.value = true; error.value = ''
-  try { await action() } catch (e) { if (alive) error.value = e.message }
+  busy.value = true; error.value = ''; errorTrace.value = ''
+  try { await action() } catch (e) { if (alive) { error.value = e.message; errorTrace.value = e.traceId || '' } }
   finally { if (alive) busy.value = false }
 }
 
@@ -111,10 +117,11 @@ function retry(task) {
 
 onMounted(async () => {
   await run(load)
+  if (!alive) return
   timer = setInterval(async () => {
-    if (polling || busy.value || document.hidden) return
+    if (!alive || polling || busy.value || document.hidden) return
     polling = true
-    try { await load() } catch (e) { if (alive) { documents.value = []; clearDetails(); error.value = e.message } }
+    try { await load(); if (alive) { error.value = ''; errorTrace.value = '' } } catch (e) { if (alive) { documents.value = []; runtime.value = null; clearDetails(); error.value = e.message; errorTrace.value = e.traceId || '' } }
     finally { polling = false }
   }, 3000)
 })
@@ -125,7 +132,8 @@ onUnmounted(() => { alive = false; clearInterval(timer); clearSource() })
   <section id="document-library" class="panel document-library">
     <div class="section-heading"><div><p class="eyebrow">DOCUMENTS & VERSIONS</p><h2>项目资料库</h2></div><button class="ghost" :disabled="busy" @click="run(load)">刷新资料</button></div>
     <p class="muted">上传、处理与版本记录在这里汇总。新版本完成后生效，构建期间继续使用原有可用版本。</p>
-    <div v-if="error" class="error" role="alert">{{ error }}</div>
+    <div v-if="error" class="error" role="alert">{{ error }}<small v-if="errorTrace">追踪编号：{{ errorTrace }}</small></div>
+    <div v-if="runtime" :class="['worker-status', { warning:runtime.worker_status!=='recent_heartbeat' }]" :data-worker-status="runtime.worker_status" role="status"><strong>{{ runtime.worker_status==='recent_heartbeat' ? '入库服务最近有心跳' : '暂未检测到入库服务的近期心跳' }}</strong><p>{{ runtime.worker_status==='recent_heartbeat' ? '这表示最近有 Worker 活动，不保证单个任务已完成。' : `最近${runtime.freshness_seconds}秒没有可用心跳；请检查 Worker 是否已启动、数据库是否可连接。长时间解析也可能延迟心跳。` }}</p><span>本项目任务：等待 {{ runtime.tasks.queued }} · 处理中 {{ runtime.tasks.processing }} · 失败 {{ runtime.tasks.failed }}</span><small v-if="runtime.oldest_pending_at">最早待完成任务：{{ localTime(runtime.oldest_pending_at) }}</small></div>
     <form v-if="admin" class="upload-area" @submit.prevent="upload">
       <div class="upload-heading"><strong>{{ target ? `更新：${target.title}` : '上传新资料' }}</strong><button v-if="target" type="button" class="text-button" @click="target = null">取消更新</button></div>
       <label>文件<input ref="fileInput" type="file" accept=".pdf,.md" :disabled="busy" @change="file = $event.target.files?.[0] || null"></label>
@@ -141,6 +149,8 @@ onUnmounted(() => { alive = false; clearInterval(timer); clearSource() })
         <td><span :class="['badge', { admin: doc.latest_version?.status === 'ready' }]">{{ !doc.is_active ? '已撤下' : `v${doc.latest_version?.number} · ${statuses[doc.latest_version?.status] || '未知'}` }}</span>
           <small v-if="doc.is_active" class="file-meta">{{ stages[doc.latest_version?.task?.stage] || '' }} · 已尝试 {{ doc.latest_version?.task?.attempts || 0 }} 次</small>
           <small v-if="doc.is_active && doc.latest_version?.task?.error_code" class="task-error">{{ reasons[doc.latest_version.task.error_code] || '处理异常，请联系管理员检查任务' }}</small>
+          <small v-if="doc.is_active && doc.latest_version?.task?.retry_at" class="file-meta">自动重试不早于 {{ localTime(doc.latest_version.task.retry_at) }}；最多 {{ doc.latest_version.task.max_attempts }} 次</small>
+          <small v-if="doc.is_active && doc.latest_version?.task?.lease_until" class="file-meta">如处理进程中断，租约到期后可重新领取：{{ localTime(doc.latest_version.task.lease_until) }}</small>
         </td>
         <td>{{ !doc.is_active ? '已停止访问' : doc.current_version_id ? `v${doc.current_version_number} 正在使用` : '尚无可用版本' }}<small v-if="doc.latest_version?.status === 'ready'" class="file-meta">{{ doc.latest_version.chunk_count }} 个片段</small></td>
         <td><div v-if="doc.is_active" class="doc-actions"><button class="text-button" :disabled="busy" @click="run(() => loadHistory(doc))">版本与原文</button><template v-if="admin"><button class="text-button" :disabled="busy" @click="chooseVersion(doc)">更新</button><button v-if="doc.latest_version?.task?.status === 'failed'" class="text-button" :disabled="busy" @click="retry(doc.latest_version.task)">重试</button><button class="danger-link" :disabled="busy" @click="withdraw(doc)">撤下</button></template></div><span v-else class="muted">已停止访问</span></td>
@@ -161,5 +171,6 @@ onUnmounted(() => { alive = false; clearInterval(timer); clearSource() })
 </template>
 
 <style scoped>
+.worker-status{border:1px solid #d9e7df;background:#f5faf7;border-radius:7px;padding:15px 18px;font-size:12px;color:#537565;margin:20px 0;overflow-wrap:anywhere}.worker-status.warning{border-color:#eadfc5;background:#fffbf1;color:#8b7448}.worker-status p{margin:7px 0;font-size:11px}.worker-status span,.worker-status small{display:block;font-size:11px;line-height:1.9}
 .document-library{scroll-margin-top:24px}.upload-area{background:#f8fafd;border:1px dashed #cbd5e2;border-radius:8px;padding:22px;margin:24px 0}.upload-heading{display:flex;justify-content:space-between;gap:16px;margin-bottom:15px}.upload-area input[type=file]{background:white}.consent{display:flex;gap:9px;align-items:flex-start;margin-top:20px;line-height:1.7;font-weight:400}.consent input{width:auto;margin-top:5px;flex-shrink:0}.docs-empty{padding:35px 16px;text-align:center;color:#8491a2}.file-meta{display:block;color:#8a96a5;font-size:11px;margin-top:8px;overflow-wrap:anywhere}.documents-table{white-space:normal}.documents-table th:first-child{width:28%}.documents-table td{vertical-align:top;min-width:140px;overflow-wrap:anywhere}.task-error{display:block;color:#a95e56;font-size:11px;margin-top:8px}.doc-actions{display:flex;gap:12px;flex-wrap:wrap}.text-button{border:0;background:transparent;padding:5px 0;color:#43658c;font-size:12px}.version-panel,.source-panel{border-top:1px solid #e4e9f0;padding-top:24px;margin-top:28px}.version-row{display:flex;justify-content:space-between;align-items:center;gap:20px;border-bottom:1px solid #edf0f4;padding:16px 0}.version-row strong{margin-right:10px}.pdf-source{width:100%;height:560px;border:1px solid #e1e5eb;border-radius:6px}.markdown-source,.chunk-card pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.8 "Microsoft YaHei",sans-serif}.markdown-source{background:#f8fafc;padding:20px;max-height:480px;overflow:auto;border-radius:6px}.chunk-card{padding:16px;background:#f8fafc;border:1px solid #edf0f4;border-radius:6px;margin-top:12px}.chunk-card small{color:#6b7e97}.chunk-card pre{margin-bottom:0}.source-panel a{color:#43658c;font-size:12px}@media(max-width:600px){.upload-area{padding:16px}.document-library{padding:20px}.version-row{align-items:flex-start}.documents-table{min-width:700px}}
 </style>

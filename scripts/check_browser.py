@@ -102,6 +102,18 @@ async def main():
             if username == 'demo_member':
                 assert await evaluate("document.querySelector('.member-form') === null"), 'Member management exposed'
             await screenshot(username + '.png')
+            if username == 'demo_admin' and '--runtime' in sys.argv:
+                await evaluate("document.querySelector('[data-nav=documents]').click()")
+                await wait_for("document.querySelector('[data-worker-status=recent_heartbeat]') !== null")
+                assert await evaluate("document.querySelector('.worker-status').textContent.includes('本项目任务') && !document.querySelector('.project-grid')"), 'Worker status missing from dedicated documents page'
+                await screenshot('runtime-desktop.png')
+                await rpc('Emulation.setDeviceMetricsOverride', {'width':390,'height':844,'deviceScaleFactor':1,'mobile':True})
+                assert await evaluate('window.innerWidth === 390 && document.documentElement.scrollWidth <= 390'), 'Mobile diagnostics page overflows'
+                await screenshot('runtime-mobile.png')
+                await rpc('Emulation.setDeviceMetricsOverride', {'width':1440,'height':1000,'deviceScaleFactor':1,'mobile':False})
+                await evaluate("document.querySelector('[data-nav=projects]').click()")
+                await wait_for("document.querySelector('.project-card') !== null && !document.querySelector('[data-nav=projects]:disabled')")
+                print('PASS worker heartbeat and project queue diagnostics, desktop and mobile')
             if username == 'demo_admin' and '--ingestion' in sys.argv:
                 await evaluate("document.querySelector('[data-nav=documents]').click()")
                 await wait_for("document.querySelector('main[data-page=documents]') && !document.querySelector('.project-grid') && !document.querySelector('#evidence-search')")
@@ -190,7 +202,7 @@ async def main():
         await screenshot('login-mobile.png')
         assert await evaluate('document.documentElement.scrollWidth <= window.innerWidth'), 'Mobile horizontal overflow'
         print('PASS mobile login layout width; screenshots in .local/browser-check')
-        (output / 'result.json').write_text(json.dumps({'status': 'passed', 'users_checked': list(accounts), 'ingestion_checked':'--ingestion' in sys.argv, 'search_checked':'--search' in sys.argv, 'questions_checked':'--questions' in sys.argv, 'checked_at': time.time()}, indent=2), encoding='utf-8')
+        (output / 'result.json').write_text(json.dumps({'status': 'passed', 'users_checked': list(accounts), 'ingestion_checked':'--ingestion' in sys.argv, 'search_checked':'--search' in sys.argv, 'questions_checked':'--questions' in sys.argv, 'runtime_checked':'--runtime' in sys.argv, 'checked_at': time.time()}, indent=2), encoding='utf-8')
         await rpc('Browser.close')
     finally:
         if session:

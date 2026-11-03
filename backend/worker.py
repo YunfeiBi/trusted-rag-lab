@@ -5,20 +5,22 @@ import hashlib
 import logging
 import time
 import uuid
+from time import perf_counter
 
 import jieba
 from sqlalchemy import and_, create_engine, delete, or_, select
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.dialects.postgresql import insert
 
 from backend.app.config import Settings
 from backend.app.ingestion import IngestionError, parse_and_chunk
 from backend.app.model_client import EmbeddingClient
-from backend.app.models import Chunk, Document, DocumentVersion, IngestionTask, utcnow
+from backend.app.models import Chunk, Document, DocumentVersion, IngestionTask, WorkerHeartbeat, utcnow
 from backend.app.storage import storage_path
+from backend.app.runtime import MAX_ATTEMPTS, LEASE_SECONDS
 
 logger = logging.getLogger('trusted_rag.worker')
-MAX_ATTEMPTS = 3
-LEASE_SECONDS = 300
 
 
 class LeaseLost(Exception):
@@ -30,6 +32,16 @@ class Worker:
         self.sessions = session_factory
         self.settings = settings
         self.model = model or EmbeddingClient()
+        self.worker_id = uuid.uuid4()
+
+    def heartbeat(self, state, db=None):
+        row = {'id': self.worker_id, 'state': state, 'last_seen': utcnow()}
+        statement = insert(WorkerHeartbeat).values(**row).on_conflict_do_update(index_elements=[WorkerHeartbeat.id], set_={'state': state, 'last_seen': row['last_seen']})
+        if db is not None:
+            db.execute(statement)
+        else:
+            with self.sessions() as session, session.begin():
+                session.execute(statement)
 
     def claim(self):
         now = utcnow()
@@ -64,6 +76,7 @@ class Worker:
             task.stage = stage
             task.lease_until = utcnow() + timedelta(seconds=LEASE_SECONDS)
             task.updated_at = utcnow()
+            self.heartbeat('busy', db)
 
     @staticmethod
     def check_lease(task, token):
@@ -71,6 +84,7 @@ class Worker:
             raise LeaseLost()
 
     def process(self, task_id, token):
+        start = perf_counter()
         try:
             with self.sessions() as db:
                 task = db.get(IngestionTask, task_id)
@@ -88,7 +102,10 @@ class Worker:
                 raise IngestionError('FILE_TOO_LARGE')
             if hashlib.sha256(data).hexdigest() != expected_hash:
                 raise IngestionError('FILE_CHANGED')
+            timer = perf_counter()
             parts = parse_and_chunk(data, path.suffix)
+            parse_ms = (perf_counter()-timer)*1000
+            timer = perf_counter()
             vectors = []
             for offset in range(0, len(parts), 8):
                 self.renew(task_id, token, 'embedding')
@@ -96,7 +113,9 @@ class Worker:
                 if len(batch) != len(parts[offset:offset+8]) or any(len(v) != 1024 for v in batch):
                     raise IngestionError('EMBEDDING_INVALID_RESPONSE')
                 vectors.extend(batch)
+            embedding_ms = (perf_counter()-timer)*1000
             self.renew(task_id, token, 'publishing')
+            timer = perf_counter()
             keywords = [' '.join(jieba.cut(p.text)) for p in parts]
             with self.sessions() as db, db.begin():
                 task_snapshot = db.get(IngestionTask, task_id)
@@ -122,9 +141,13 @@ class Worker:
                 task.stage = 'done'
                 task.error_code = task.lease_token = task.lease_until = None
                 task.updated_at = utcnow()
-            logger.info('task=%s status=succeeded chunks=%s', task_id, len(parts))
+            logger.info('task=%s status=succeeded chunks=%s parse_ms=%.2f embedding_ms=%.2f publish_ms=%.2f total_ms=%.2f', task_id, len(parts), parse_ms, embedding_ms, (perf_counter()-timer)*1000, (perf_counter()-start)*1000)
         except LeaseLost:
             logger.info('task=%s status=lease_lost', task_id)
+        except SQLAlchemyError:
+            # Do not change task state on an uncertain database outcome. Reclaim
+            # after lease expiry if publication did not commit successfully.
+            raise
         except Exception as exc:
             logger.warning('task=%s failure_type=%s', task_id, type(exc).__name__)
             failure = exc if isinstance(exc, IngestionError) else IngestionError('UNEXPECTED_PROCESSING_ERROR', retryable=True)
@@ -154,11 +177,37 @@ class Worker:
             logger.warning('task=%s status=%s code=%s', task_id, task.status, failure.code)
 
     def run_once(self):
+        self.heartbeat('idle')
         claimed = self.claim()
         if claimed is None:
             return False
+        self.heartbeat('busy')
         self.process(*claimed)
+        self.heartbeat('idle')
         return True
+
+
+def run_loop(worker, *, once=False, sleep=time.sleep):
+    failures = 0
+    while True:
+        try:
+            worked = worker.run_once()
+            if failures:
+                logger.info('event=worker_database_recovered failures=%s', failures)
+            failures = 0
+        except SQLAlchemyError as exc:
+            failures += 1
+            delay = min(30, 2 ** min(failures-1, 5))
+            # Exception text can contain connection credentials or SQL parameters.
+            logger.warning('event=worker_database_unavailable type=%s retry_seconds=%s', type(exc).__name__, delay)
+            if once:
+                return 1
+            sleep(delay)
+            continue
+        if once:
+            return 0
+        if not worked:
+            sleep(1)
 
 
 def main():
@@ -168,20 +217,19 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     logging.getLogger('httpx').setLevel(logging.WARNING)
     settings = Settings.load()
-    engine = create_engine(settings.database_url, pool_pre_ping=True, hide_parameters=True)
+    engine = create_engine(settings.database_url, pool_pre_ping=True, hide_parameters=True, connect_args={'connect_timeout': 5}, pool_timeout=5)
     worker = Worker(sessionmaker(engine, expire_on_commit=False), settings)
     try:
-        while True:
-            worked = worker.run_once()
-            if arguments.once:
-                break
-            if not worked:
-                time.sleep(1)
+        return run_loop(worker, once=arguments.once)
     except KeyboardInterrupt:
         pass
     finally:
+        try:
+            worker.heartbeat('stopped')
+        except SQLAlchemyError:
+            pass
         engine.dispose()
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

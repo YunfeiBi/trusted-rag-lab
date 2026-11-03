@@ -27,7 +27,7 @@ class EmbeddingClient:
             if response.status_code != 200:
                 raise IngestionError('EMBEDDING_HTTP_ERROR', retryable=response.status_code in {408,429} or response.status_code >= 500)
             rows = sorted(response.json()['data'], key=lambda row: row['index'])
-            if [row['index'] for row in rows] != list(range(len(texts))):
+            if any(type(row['index']) is not int for row in rows) or [row['index'] for row in rows] != list(range(len(texts))):
                 raise ValueError('Invalid indices')
             vectors = [row['embedding'] for row in rows]
             for vector in vectors:

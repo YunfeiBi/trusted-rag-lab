@@ -104,6 +104,14 @@ class IngestionTask(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class WorkerHeartbeat(Base):
+    __tablename__ = 'worker_heartbeats'
+    __table_args__ = (CheckConstraint("state IN ('idle','busy','stopped')", name='ck_worker_state'),)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    state: Mapped[str] = mapped_column(String(16))
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class Chunk(Base):
     __tablename__ = 'chunks'
     __table_args__ = (UniqueConstraint('version_id', 'ordinal', name='uq_chunk_ordinal'),)

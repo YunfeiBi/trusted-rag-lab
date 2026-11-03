@@ -53,7 +53,7 @@ onUnmounted(() => { alive = false; clearInterval(timer) })
 
 <template>
   <section id="evidence-search" class="panel search-panel">
-    <p class="eyebrow">EVIDENCE SEARCH</p><h2>在项目资料中寻找依据</h2><p class="muted">仅检索“{{ project.name }}”中你有权访问的当前可用版本。这里展示证据片段，问答生成将在后续开放。</p>
+    <p class="eyebrow">EVIDENCE SEARCH</p><h2>在项目资料中寻找依据</h2><p class="muted">仅检索“{{ project.name }}”中你有权访问的当前可用版本。在这里核对证据片段，需要生成回答时请进入知识问答页面。</p>
     <form class="search-form" @submit.prevent="search">
       <label>检索问题<input v-model="query" class="search-query" required maxlength="500" placeholder="例如：项目资料通过什么方式控制访问权限？"></label>
       <div class="search-options"><label>检索方式<select v-model="mode" :disabled="busy"><option value="hybrid">混合检索</option><option value="vector">纯向量检索</option><option value="keyword">关键词检索（本地）</option></select></label><label>返回片段<select v-model.number="topK" :disabled="busy"><option :value="3">3 个</option><option :value="5">5 个</option><option :value="10">10 个</option></select></label><label class="option-check"><input v-model="rerank" type="checkbox" :disabled="mode !== 'hybrid' || busy">启用重排序</label></div>

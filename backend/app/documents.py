@@ -10,6 +10,7 @@ from sqlalchemy import select
 from .dependencies import CurrentUser, Db, require_membership
 from .models import Chunk, Document, DocumentVersion, IngestionTask, utcnow
 from .storage import storage_path
+from .runtime import MAX_ATTEMPTS
 
 router = APIRouter(prefix='/api')
 
@@ -38,7 +39,10 @@ def version_output(db, version):
 
 def task_output(task):
     return {'id': str(task.id), 'version_id': str(task.version_id), 'status': task.status,
-            'stage': task.stage, 'attempts': task.attempts, 'error_code': task.error_code, 'updated_at': task.updated_at}
+            'stage': task.stage, 'attempts': task.attempts, 'error_code': task.error_code, 'updated_at': task.updated_at,
+            'max_attempts': MAX_ATTEMPTS,
+            'retry_at': task.available_at if task.status == 'queued' and task.attempts else None,
+            'lease_until': task.lease_until if task.status == 'processing' else None}
 
 
 def document_output(db, document):
