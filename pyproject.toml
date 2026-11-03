@@ -1,7 +1,7 @@
 [project]
 name = "trusted-rag-lab"
 version = "0.1.0"
-description = "Course project development environment for trustworthy RAG"
+description = "Zhixu: knowledge management and collaboration for university research teams"
 requires-python = ">=3.13,<3.14"
 dependencies = [
   "fastapi",

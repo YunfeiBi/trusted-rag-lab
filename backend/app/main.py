@@ -43,7 +43,7 @@ def create_app(settings=None, engine=None):
         if owns_engine:
             application.state.engine.dispose()
 
-    application = FastAPI(title='可信 RAG 知识服务', version='0.1.0', lifespan=lifespan)
+    application = FastAPI(title='知序——高校科研团队知识管理与协作平台', version='0.1.0', lifespan=lifespan)
     settings = settings or Settings.load()
     application.state.settings = settings
     application.state.embedding_client = EmbeddingClient(timeout=15)

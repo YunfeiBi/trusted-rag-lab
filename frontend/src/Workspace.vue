@@ -238,12 +238,12 @@ onUnmounted(() => window.removeEventListener('hashchange',syncRoute))
   <div v-if="!user" class="login-shell">
     <section class="intro">
       <div class="university-lockup"><img :src="emblem" alt="重庆邮电大学校徽" class="university-emblem"><div><strong>重庆邮电大学</strong><span>软件体系结构课程项目</span></div></div>
-      <div class="brand"><span class="brand-icon">知</span> 知序 <small>Knowledge Workspace</small></div>
-      <p class="eyebrow">软件体系结构课程 · 可信 RAG</p>
+      <div class="brand"><span class="brand-icon">知</span> 知序 <small>Knowledge &amp; Collaboration</small></div>
+      <p class="eyebrow">高校科研团队知识管理与协作平台</p>
       <h1>让知识有据可循，<br>让协作有序发生。</h1>
-      <p class="intro-text">从项目空间开始，建立资料的访问边界。逐步连接文档、检索和有出处的回答。</p>
-      <div class="principles"><span>01 项目隔离</span><span>02 证据溯源</span><span>03 版本可追踪</span></div>
-      <p class="stage-note">七个独立板块连接项目、资料、检索、问答、任务、评测与运行审计。</p>
+      <p class="intro-text">以实验团队组织师生协作，管理公共资料与项目内部知识，让检索和回答有据可循。</p>
+      <div class="principles"><span>01 师生团队</span><span>02 分级授权</span><span>03 知识溯源</span></div>
+      <p class="stage-note">七个独立板块连接团队协作、资料管理、证据检索与引用问答。</p>
     </section>
     <section class="login-card">
       <p class="eyebrow">{{ authMode==='register'?'CREATE ACCOUNT':'WELCOME BACK' }}</p><h2>{{ authMode==='register'?'注册账号':'进入工作空间' }}</h2><p class="muted">{{ authMode==='register'?'使用中文或英文用户名建立你的账号。':'使用已注册账号登录。' }}</p>
