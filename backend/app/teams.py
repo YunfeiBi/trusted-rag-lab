@@ -5,12 +5,12 @@ from uuid import UUID
 
 from fastapi import APIRouter,HTTPException,Query,Request
 from pydantic import BaseModel,ConfigDict,Field
-from sqlalchemy import delete,select
+from sqlalchemy import delete,func,select
 from sqlalchemy.exc import IntegrityError
 
 from .audit import record_event
 from .dependencies import CurrentUser,Db,require_team
-from .models import Membership,Project,Team,TeamApplication,TeamMembership,User,utcnow
+from .models import Document,DocumentVersion,IngestionTask,Membership,Project,Team,TeamApplication,TeamMembership,User,utcnow
 from .schemas import ContactUserOutput
 
 router=APIRouter(prefix='/api')
@@ -39,6 +39,11 @@ class TeamRoleInput(BaseModel):
     role:Literal['admin','member']
 
 
+class DeleteTeamInput(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    confirm_name:str=Field(min_length=1,max_length=100)
+
+
 def library(db,team_id):
     project=db.scalar(select(Project).where(Project.team_id==team_id,Project.is_team_library.is_(True)))
     if not project:
@@ -53,7 +58,7 @@ def team_output(db,team,member):
 
 @router.get('/teams')
 def teams(user:CurrentUser,db:Db):
-    rows=db.execute(select(Team,TeamMembership).join(TeamMembership).where(TeamMembership.user_id==user.id).order_by(Team.created_at,Team.id))
+    rows=db.execute(select(Team,TeamMembership).join(TeamMembership).where(TeamMembership.user_id==user.id,Team.is_active.is_(True)).order_by(Team.created_at,Team.id))
     return [team_output(db,t,m) for t,m in rows]
 
 
@@ -84,7 +89,7 @@ def update_team(team_id:UUID,data:TeamInput,user:CurrentUser,db:Db,request:Reque
 
 @router.post('/team-applications',status_code=201)
 def apply(data:ApplicationInput,user:CurrentUser,db:Db):
-    team=db.scalar(select(Team).where(Team.code==data.code.upper()).with_for_update())
+    team=db.scalar(select(Team).where(Team.code==data.code.upper(),Team.is_active.is_(True)).with_for_update())
     if not team:
         raise HTTPException(404,'团队编号无效，请向团队管理员确认。')
     if db.get(TeamMembership,(team.id,user.id)):
@@ -105,8 +110,8 @@ def apply(data:ApplicationInput,user:CurrentUser,db:Db):
 
 @router.get('/team-applications')
 def my_applications(user:CurrentUser,db:Db):
-    rows=db.execute(select(TeamApplication,Team.name).join(Team,Team.id==TeamApplication.team_id).where(TeamApplication.user_id==user.id).order_by(TeamApplication.created_at.desc()).limit(100))
-    return [{'id':str(a.id),'team_name':name,'team_id':str(a.team_id),'status':a.status,'review_note':a.review_note,'created_at':a.created_at} for a,name in rows]
+    rows=db.execute(select(TeamApplication,Team).join(Team,Team.id==TeamApplication.team_id).where(TeamApplication.user_id==user.id).order_by(TeamApplication.created_at.desc()).limit(100))
+    return [{'id':str(a.id),'team_name':team.name,'team_id':str(a.team_id),'team_deleted':not team.is_active,'status':a.status,'review_note':a.review_note,'created_at':a.created_at} for a,team in rows]
 
 
 @router.delete('/team-applications/{application_id}',status_code=204)
@@ -114,7 +119,9 @@ def cancel_application(application_id:UUID,user:CurrentUser,db:Db):
     snapshot=db.get(TeamApplication,application_id)
     if not snapshot or snapshot.user_id!=user.id:
         raise HTTPException(404,'申请不存在或不可访问')
-    db.scalar(select(Team).where(Team.id==snapshot.team_id).with_for_update())
+    team=db.scalar(select(Team).where(Team.id==snapshot.team_id).with_for_update())
+    if not team or not team.is_active:
+        raise HTTPException(404,'团队已删除，申请已关闭')
     application=db.scalar(select(TeamApplication).where(TeamApplication.id==application_id).execution_options(populate_existing=True))
     if application.status!='pending':
         raise HTTPException(409,'只能撤回待审批申请')
@@ -218,3 +225,44 @@ def transfer(team_id:UUID,user_id:UUID,user:CurrentUser,db:Db,request:Request):
     record_event(db,public.id,user.id,'team.owner_transferred',user_id,request.state.trace_id)
     db.commit()
     return {'owner_id':str(user_id)}
+
+
+def deletion_counts(db,team_id):
+    projects=select(Project.id).where(Project.team_id==team_id)
+    return {'projects':db.scalar(select(func.count()).select_from(Project).where(Project.team_id==team_id,Project.is_team_library.is_(False))),
+            'documents':db.scalar(select(func.count()).select_from(Document).where(Document.project_id.in_(projects))),
+            'members':db.scalar(select(func.count()).select_from(TeamMembership).where(TeamMembership.team_id==team_id)),
+            'pending_tasks':db.scalar(select(func.count()).select_from(IngestionTask).join(DocumentVersion,DocumentVersion.id==IngestionTask.version_id).join(Document,Document.id==DocumentVersion.document_id).where(Document.project_id.in_(projects),IngestionTask.status.in_(['queued','processing'])))}
+
+
+@router.get('/teams/{team_id}/deletion-preview')
+def deletion_preview(team_id:UUID,user:CurrentUser,db:Db):
+    team,_=require_team(db,team_id,user.id,owner=True)
+    return {'team_name':team.name,**deletion_counts(db,team_id),'retention':'logical_delete'}
+
+
+@router.delete('/teams/{team_id}',status_code=204)
+def delete_team(team_id:UUID,data:DeleteTeamInput,user:CurrentUser,db:Db,request:Request):
+    team,_=require_team(db,team_id,user.id,owner=True,lock=True)
+    if data.confirm_name!=team.name:
+        raise HTTPException(409,'团队名称不匹配，请输入当前完整团队名称确认。')
+    public_id=library(db,team_id).id
+    # Common order: team -> projects -> documents -> tasks. Worker publication
+    # locks documents before tasks; no worker holds a task while waiting on a doc.
+    project_ids=list(db.scalars(select(Project.id).where(Project.team_id==team_id).order_by(Project.id).with_for_update()))
+    documents=db.scalars(select(Document).where(Document.project_id.in_(project_ids)).order_by(Document.id).with_for_update()).all()
+    for document in documents:
+        document.is_active=False
+    task_rows=db.scalars(select(IngestionTask).join(DocumentVersion,DocumentVersion.id==IngestionTask.version_id).join(Document,Document.id==DocumentVersion.document_id).where(Document.project_id.in_(project_ids),IngestionTask.status.in_(['queued','processing'])).order_by(IngestionTask.id).with_for_update(of=IngestionTask)).all()
+    now=utcnow()
+    for task in task_rows:
+        task.status=task.stage='cancelled';task.error_code='TEAM_DELETED';task.lease_until=task.lease_token=None;task.updated_at=now
+        db.get(DocumentVersion,task.version_id).status='cancelled'
+    pending=db.scalars(select(TeamApplication).where(TeamApplication.team_id==team_id,TeamApplication.status=='pending')).all()
+    for application in pending:
+        application.status='cancelled';application.review_note='团队已删除，申请自动关闭。';application.reviewed_by=user.id;application.reviewed_at=now
+    db.execute(delete(Membership).where(Membership.project_id.in_(project_ids)))
+    db.execute(delete(TeamMembership).where(TeamMembership.team_id==team_id))
+    team.is_active=False;team.deleted_at=now
+    record_event(db,public_id,user.id,'team.deleted',team_id,request.state.trace_id,{'status':'deleted'})
+    db.commit()

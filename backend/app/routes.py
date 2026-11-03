@@ -9,7 +9,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from .dependencies import CurrentUser, Db, bearer, require_membership, require_team
-from .models import LoginSession, Membership, Project, TeamMembership, User, utcnow
+from .models import LoginSession, Membership, Project, Team, TeamMembership, User, utcnow
 from .schemas import ContactUserOutput, LoginInput, LoginOutput, MemberInput, MemberOutput, ProfileInput, ProjectInput, ProjectOutput, ProjectUpdate, RegisterInput, UserOutput, normalize_username
 from .security import DUMMY_HASH, hash_password, token_digest, verify_password
 from .audit import record_event
@@ -88,7 +88,7 @@ def project_output(project, membership):
 
 @router.get('/projects', response_model=list[ProjectOutput])
 def list_projects(user: CurrentUser, db: Db,team_id:UUID|None=None,include_libraries:bool=False):
-    query=select(Project, Membership).join(Membership).join(TeamMembership,(TeamMembership.team_id==Project.team_id)&(TeamMembership.user_id==Membership.user_id)).where(Membership.user_id == user.id)
+    query=select(Project, Membership).join(Membership).join(Team,Team.id==Project.team_id).join(TeamMembership,(TeamMembership.team_id==Project.team_id)&(TeamMembership.user_id==Membership.user_id)).where(Membership.user_id == user.id,Team.is_active.is_(True))
     if team_id:
         require_team(db,team_id,user.id)
         query=query.where(Project.team_id==team_id)

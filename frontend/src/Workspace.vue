@@ -134,7 +134,10 @@ async function selectProject(project) {
   members.value = []; selected.value = project; editingProject.value = false
   if(project)activeTeamId.value=project.team_id
   window.history.replaceState(null,'',pageUrl(page.value,project))
-  if (page.value==='projects' && project) members.value = await api(`/projects/${project.id}/members`)
+  if (page.value==='projects' && project) {
+    const roster=await api(`/projects/${project.id}/members`)
+    if(selected.value?.id===project.id&&page.value==='projects')members.value=roster
+  }
 }
 
 function switchAuth() {

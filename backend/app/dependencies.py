@@ -36,7 +36,7 @@ CurrentUser = Annotated[User, Depends(current_user)]
 
 
 def require_team(db,team_id,user_id,*,admin=False,owner=False,lock=False):
-    query=select(Team).where(Team.id==team_id)
+    query=select(Team).where(Team.id==team_id,Team.is_active.is_(True))
     if lock:
         query=query.with_for_update().execution_options(populate_existing=True)
     team=db.scalar(query)

@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 async def main():
+    if '--delete-team' in sys.argv and '--accounts' not in sys.argv:
+        raise SystemExit('Team deletion smoke check requires --accounts and only deletes its newly created synthetic team.')
     with httpx.Client(timeout=5) as health_client:
         for attempt in range(30):
             try:
@@ -182,6 +184,7 @@ async def main():
             assert await evaluate("Array.from(document.querySelectorAll('.members-table a')).some(e=>e.getAttribute('href')==="+json.dumps('mailto:'+updated_email)+")"), 'Shared QQ mailto contact missing'
             await wait_for("document.querySelectorAll('.team-person').length===2")
             assert await evaluate("document.querySelector('.team-create-form')===null"), 'Students must not get a team creation form'
+            assert await evaluate("document.querySelector('.delete-team-button')===null"), 'Only the team owner may see the deletion entry'
             await evaluate("document.querySelector('.team-library-button').click()")
             await wait_for("document.querySelector('#document-library') && !document.querySelector('[data-nav=projects]:disabled')")
             assert await evaluate("document.querySelector('.project-selector').selectedOptions[0].textContent.includes('全团队公共') && !document.querySelector('.upload-area')"), 'Student public library must be read only'
@@ -202,6 +205,38 @@ async def main():
             assert await evaluate('document.documentElement.scrollWidth <= 390'), 'Registration mobile overflow'
             await evaluate("document.querySelector('.auth-switch').click()")
             await rpc('Emulation.setDeviceMetricsOverride', {'width':1440,'height':1000,'deviceScaleFactor':1,'mobile':False})
+            if '--delete-team' in sys.argv:
+                await fill('input[autocomplete=username]',owner_name)
+                await fill('input[autocomplete=current-password]',test_password)
+                await evaluate("document.querySelector('.auth-form').requestSubmit()")
+                await wait_for("document.querySelector('.delete-team-button') && !document.querySelector('[data-nav=projects]:disabled')")
+                team_name='浏览器合成实验团队-'+suffix
+                await evaluate("document.querySelector('.delete-team-button').click()")
+                await wait_for("document.querySelector('.delete-team-form') !== null")
+                await fill('.delete-team-name','not-the-team-name')
+                assert await evaluate("document.querySelector('.confirm-delete-team').disabled"), 'Deletion must require the exact name'
+                await screenshot('delete-team-desktop.png')
+                await rpc('Emulation.setDeviceMetricsOverride', {'width':390,'height':844,'deviceScaleFactor':1,'mobile':True})
+                assert await evaluate('document.documentElement.scrollWidth <= 390'), 'Team deletion mobile overflow'
+                await screenshot('delete-team-mobile.png')
+                await fill('.delete-team-name',team_name)
+                assert await evaluate("!document.querySelector('.confirm-delete-team').disabled")
+                await evaluate("document.querySelector('.delete-team-form').requestSubmit()")
+                await wait_for("document.querySelector('.team-notice')?.textContent.includes('已删除') && !document.querySelector('.team-overview') && !document.querySelector('[data-nav=projects]:disabled')")
+                assert await evaluate("document.querySelectorAll('.project-card').length===0"), 'Deleted team projects must disappear'
+                with httpx.Client(base_url='http://127.0.0.1:8000/api',timeout=10) as client:
+                    auth=client.post('/auth/login',json={'username':member_name,'password':test_password});auth.raise_for_status()
+                    headers={'Authorization':'Bearer '+auth.json()['access_token']}
+                    try:
+                        assert client.get('/teams',headers=headers).json()==[]
+                        assert client.get('/projects',headers=headers).json()==[]
+                        assert client.get('/team-applications',headers=headers).json()[0]['team_deleted']
+                    finally:
+                        client.post('/auth/logout',headers=headers)
+                await evaluate("Array.from(document.querySelectorAll('button')).find(e=>e.textContent==='退出登录').click()")
+                await wait_for("document.querySelector('.login-card input[type=password]') !== null")
+                await rpc('Emulation.setDeviceMetricsOverride', {'width':1440,'height':1000,'deviceScaleFactor':1,'mobile':False})
+                print('PASS owner-only team deletion, exact-name confirmation, desktop/mobile, project removal and member access revocation; deleted only the team created by this run')
             print('PASS synthetic teacher confirmation, teacher-only creation, student application/approval, public/private project roles, registration, contacts and mobile layout')
         records = json.loads((ROOT / '.local' / 'demo_accounts.json').read_text(encoding='utf-8'))
         accounts = {a['username']: a for a in records['accounts']}
@@ -377,7 +412,7 @@ async def main():
         await screenshot('login-mobile.png')
         assert await evaluate('document.documentElement.scrollWidth <= window.innerWidth'), 'Mobile horizontal overflow'
         print('PASS mobile login layout width; screenshots in .local/browser-check')
-        (output / 'result.json').write_text(json.dumps({'status': 'passed', 'users_checked': list(accounts), 'ingestion_checked':'--ingestion' in sys.argv, 'search_checked':'--search' in sys.argv, 'questions_checked':'--questions' in sys.argv, 'runtime_checked':'--runtime' in sys.argv,'centers_checked':'--centers' in sys.argv,'accounts_checked':'--accounts' in sys.argv, 'checked_at': time.time()}, indent=2), encoding='utf-8')
+        (output / 'result.json').write_text(json.dumps({'status': 'passed', 'users_checked': list(accounts), 'ingestion_checked':'--ingestion' in sys.argv, 'search_checked':'--search' in sys.argv, 'questions_checked':'--questions' in sys.argv, 'runtime_checked':'--runtime' in sys.argv,'centers_checked':'--centers' in sys.argv,'accounts_checked':'--accounts' in sys.argv,'team_deletion_checked':'--delete-team' in sys.argv, 'checked_at': time.time()}, indent=2), encoding='utf-8')
         await rpc('Browser.close')
     finally:
         if session:

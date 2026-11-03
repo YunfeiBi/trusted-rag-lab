@@ -6,6 +6,7 @@ let alive=true,timer,loading=false
 const actions={'project.created':'创建项目','project.updated':'修改项目信息','member.updated':'更新成员角色','member.removed':'撤销成员','document.version_uploaded':'上传资料版本','document.withdrawn':'撤下资料','task.retried':'重试任务','evaluation.case_created':'创建评测样例','evaluation.run_completed':'完成检索评测'}
 const time=v=>v?new Date(v).toLocaleString('zh-CN',{hour12:false}):'暂无'
 Object.assign(actions,{'team.created':'创建实验团队','team.updated':'修改团队信息','team.application_reviewed':'审批入组申请','team.member_role':'调整团队角色','team.member_left':'退出团队','team.member_removed':'移除团队成员','team.owner_transferred':'转交团队所有权'})
+actions['team.deleted']='删除团队'
 async function load(){if(loading)return;loading=true;try{const data=await props.api('/projects/'+props.project.id+'/ingestion-status');const cfg=await props.api('/file-limits');const audit=props.project.role==='admin'?await props.api(`/projects/${props.project.id}/audit-events?offset=${offset.value}&limit=30`):[];if(alive){health.value=data;limits.value=cfg;events.value=audit;error.value=''}}catch(e){if(alive){health.value=null;events.value=[];error.value=e.message;trace.value=e.traceId||''}}finally{loading=false}}
 async function page(step){offset.value=Math.max(0,offset.value+step);await load()}
 onMounted(async()=>{await load();if(alive)timer=setInterval(()=>{if(!document.hidden)load()},7000)})
