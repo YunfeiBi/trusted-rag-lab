@@ -6,6 +6,9 @@ const documents = ref([])
 const error = ref('')
 const errorTrace = ref('')
 const runtime = ref(null)
+const limits = ref(null)
+const pdfPassword = ref('')
+const uploadNotice = ref('')
 const busy = ref(false)
 const file = ref(null)
 const fileInput = ref(null)
@@ -22,11 +25,12 @@ const previewTitle = ref('')
 let timer
 let alive = true
 let polling = false
+let pollFailure = false
 const admin = computed(() => props.project.role === 'admin')
 const statuses = { queued: '等待处理', processing: '处理中', ready: '已就绪', failed: '处理失败', cancelled: '已取消', succeeded: '已完成' }
 const stages = { queued: '等待 Worker', parsing: '解析与分块', embedding: '生成向量', publishing: '发布索引', done: '入库完成', failed: '失败', cancelled: '取消' }
 function localTime(value) { return new Date(value).toLocaleString('zh-CN', {hour12:false}) }
-const reasons = { INVALID_UTF8: 'Markdown 需使用 UTF-8 编码', NO_TEXT: '未提取到文字，扫描件需另做 OCR', INVALID_PDF: 'PDF 无法解析', ENCRYPTED_PDF: '不支持加密 PDF', TEXT_TOO_LARGE: '提取文本超过20万字符', TOO_MANY_PAGES: 'PDF 超过200页', PDF_PAGE_TOO_LARGE: 'PDF 单页内容流过大', EMBEDDING_UNAVAILABLE: '向量服务暂不可用', EMBEDDING_HTTP_ERROR: '向量服务返回错误', EMBEDDING_INVALID_RESPONSE: '向量返回格式或维度不匹配', MODEL_NOT_CONFIGURED: '向量服务未配置', LEASE_EXHAUSTED: 'Worker 多次超时，可手动重试', FILE_NOT_FOUND: '原文件不存在', FILE_CHANGED: '原文件校验失败' }
+const reasons = { INVALID_UTF8: 'Markdown 需使用 UTF-8 编码', NO_TEXT: '未提取到文字，扫描件需另做 OCR', INVALID_PDF: 'PDF 无法解析', ENCRYPTED_PDF: '请重新上传并提供有权使用的PDF密码', TEXT_TOO_LARGE: '提取文本超过当前字符上限', TOO_MANY_PAGES: 'PDF 超过当前页数上限', PDF_PAGE_TOO_LARGE: 'PDF 单页内容流过大', EMBEDDING_UNAVAILABLE: '向量服务暂不可用', EMBEDDING_HTTP_ERROR: '向量服务返回错误', EMBEDDING_INVALID_RESPONSE: '向量返回格式或维度不匹配', MODEL_NOT_CONFIGURED: '向量服务未配置', LEASE_EXHAUSTED: 'Worker 多次超时，可手动重试', FILE_NOT_FOUND: '原文件不存在', FILE_CHANGED: '原文件校验失败', PROCESSING_TIMEOUT: '处理超时，请拆分资料后重试', TOO_MANY_CHUNKS: '片段数量超过当前上限', PARSE_FAILED: '解析失败，请检查文件或拆分后重试' }
 
 function clearSource() {
   if (sourceUrl.value) URL.revokeObjectURL(sourceUrl.value)
@@ -44,6 +48,8 @@ async function load() {
   const status = await props.api(`/projects/${props.project.id}/ingestion-status`)
   if (!alive) return
   runtime.value = status
+  const config = await props.api('/file-limits')
+  if (alive) limits.value = config
   if (selectedDocument.value && !result.some(d => d.id === selectedDocument.value.id && d.is_active)) clearDetails()
   if (selectedDocument.value) {
     const id = selectedDocument.value.id
@@ -61,13 +67,18 @@ async function run(action) {
 
 function upload() {
   return run(async () => {
+    uploadNotice.value = ''
     if (!file.value || !consent.value) throw new Error('请选择文件并确认资料授权与向量服务处理')
     const form = new FormData()
     form.append('file', file.value)
     form.append('allow_external_processing', 'true')
+    if (pdfPassword.value) form.append('pdf_password',pdfPassword.value)
     if (!target.value) form.append('project_id', props.project.id)
     const path = target.value ? `/documents/${target.value.id}/versions` : '/documents'
-    await props.api(path, { method: 'POST', body: form })
+    let response
+    try { response = await props.api(path, { method: 'POST', body: form }) }
+    finally { pdfPassword.value = '' }
+    uploadNotice.value = response.decrypted ? 'PDF已解密并提交入库。项目内保存的是解密副本，文件密码未保存。' : '已提交入库，请在任务中心查看处理进度。'
     file.value = null; consent.value = false; target.value = null
     if (fileInput.value) fileInput.value.value = ''
     clearDetails()
@@ -76,7 +87,7 @@ function upload() {
 }
 
 function chooseVersion(document) {
-  target.value = document; consent.value = false
+  target.value = document; consent.value = false; pdfPassword.value = ''
   fileInput.value?.focus()
 }
 
@@ -121,11 +132,11 @@ onMounted(async () => {
   timer = setInterval(async () => {
     if (!alive || polling || busy.value || document.hidden) return
     polling = true
-    try { await load(); if (alive) { error.value = ''; errorTrace.value = '' } } catch (e) { if (alive) { documents.value = []; runtime.value = null; clearDetails(); error.value = e.message; errorTrace.value = e.traceId || '' } }
+    try { await load(); if (alive && pollFailure) { error.value = ''; errorTrace.value = ''; pollFailure = false } } catch (e) { if (alive) { pollFailure = true; documents.value = []; runtime.value = null; clearDetails(); error.value = e.message; errorTrace.value = e.traceId || '' } }
     finally { polling = false }
   }, 3000)
 })
-onUnmounted(() => { alive = false; clearInterval(timer); clearSource() })
+onUnmounted(() => { alive = false; clearInterval(timer); clearSource(); pdfPassword.value = '' })
 </script>
 
 <template>
@@ -133,11 +144,14 @@ onUnmounted(() => { alive = false; clearInterval(timer); clearSource() })
     <div class="section-heading"><div><p class="eyebrow">DOCUMENTS & VERSIONS</p><h2>项目资料库</h2></div><button class="ghost" :disabled="busy" @click="run(load)">刷新资料</button></div>
     <p class="muted">上传、处理与版本记录在这里汇总。新版本完成后生效，构建期间继续使用原有可用版本。</p>
     <div v-if="error" class="error" role="alert">{{ error }}<small v-if="errorTrace">追踪编号：{{ errorTrace }}</small></div>
+    <p v-if="uploadNotice" class="hint" role="status">{{ uploadNotice }}</p>
     <div v-if="runtime" :class="['worker-status', { warning:runtime.worker_status!=='recent_heartbeat' }]" :data-worker-status="runtime.worker_status" role="status"><strong>{{ runtime.worker_status==='recent_heartbeat' ? '入库服务最近有心跳' : '暂未检测到入库服务的近期心跳' }}</strong><p>{{ runtime.worker_status==='recent_heartbeat' ? '这表示最近有 Worker 活动，不保证单个任务已完成。' : `最近${runtime.freshness_seconds}秒没有可用心跳；请检查 Worker 是否已启动、数据库是否可连接。长时间解析也可能延迟心跳。` }}</p><span>本项目任务：等待 {{ runtime.tasks.queued }} · 处理中 {{ runtime.tasks.processing }} · 失败 {{ runtime.tasks.failed }}</span><small v-if="runtime.oldest_pending_at">最早待完成任务：{{ localTime(runtime.oldest_pending_at) }}</small></div>
     <form v-if="admin" class="upload-area" @submit.prevent="upload">
       <div class="upload-heading"><strong>{{ target ? `更新：${target.title}` : '上传新资料' }}</strong><button v-if="target" type="button" class="text-button" @click="target = null">取消更新</button></div>
       <label>文件<input ref="fileInput" type="file" accept=".pdf,.md" :disabled="busy" @change="file = $event.target.files?.[0] || null"></label>
-      <p class="hint">支持文本型 PDF、UTF-8 Markdown；文件不超过20MB，PDF不超过200页。暂不支持扫描件OCR及加密PDF。</p>
+      <p class="hint">支持文本型PDF、UTF-8 Markdown。当前文件上限 {{ limits ? limits.max_upload_bytes/1048576 : '…' }} MB，PDF最多 {{ limits?.max_pdf_pages??'…' }} 页；文字和处理时长也有上限，详见运行与审计。扫描件仍需OCR。</p>
+      <label>PDF密码（仅加密文件需要）<input v-model="pdfPassword" class="pdf-password" type="password" autocomplete="off" maxlength="256" :disabled="busy" placeholder="输入你有权使用的文件密码"></label>
+      <p class="hint">加密PDF将在本机解密，项目内保存可访问的解密副本。密码只用于本次处理，不写日志或数据库；无论成功或失败都会清空输入框。</p>
       <label class="consent"><input v-model="consent" type="checkbox" required>我有权上传此资料，允许将提取文本发送至已配置的向量服务。</label>
       <button class="primary" :disabled="busy || !file || !consent">{{ busy ? '正在提交…' : target ? '提交新版本' : '上传并入库' }}</button>
     </form>

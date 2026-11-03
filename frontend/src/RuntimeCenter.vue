@@ -1,0 +1,18 @@
+<script setup>
+import { onMounted,onUnmounted,ref } from 'vue'
+const props=defineProps({project:Object,api:Function})
+const health=ref(null), limits=ref(null), events=ref([]), error=ref(''), trace=ref(''), offset=ref(0)
+let alive=true,timer,loading=false
+const actions={'project.created':'创建项目','member.updated':'更新成员角色','member.removed':'撤销成员','document.version_uploaded':'上传资料版本','document.withdrawn':'撤下资料','task.retried':'重试任务','evaluation.case_created':'创建评测样例','evaluation.run_completed':'完成检索评测'}
+const time=v=>v?new Date(v).toLocaleString('zh-CN',{hour12:false}):'暂无'
+async function load(){if(loading)return;loading=true;try{const data=await props.api('/projects/'+props.project.id+'/ingestion-status');const cfg=await props.api('/file-limits');const audit=props.project.role==='admin'?await props.api(`/projects/${props.project.id}/audit-events?offset=${offset.value}&limit=30`):[];if(alive){health.value=data;limits.value=cfg;events.value=audit;error.value=''}}catch(e){if(alive){health.value=null;events.value=[];error.value=e.message;trace.value=e.traceId||''}}finally{loading=false}}
+async function page(step){offset.value=Math.max(0,offset.value+step);await load()}
+onMounted(async()=>{await load();if(alive)timer=setInterval(()=>{if(!document.hidden)load()},7000)})
+onUnmounted(()=>{alive=false;clearInterval(timer)})
+</script>
+<template>
+  <div class="runtime-center"><section class="panel"><div class="section-heading"><div><p class="eyebrow">OPERATIONS & AUDIT</p><h2>运行与审计</h2></div><button class="ghost" @click="load">刷新</button></div><p v-if="error" class="error">{{ error }}<small>{{ trace }}</small></p>
+    <template v-if="health"><div class="center-metrics"><article><span>入库服务</span><strong>{{ health.worker_status==='recent_heartbeat'?'近期有活动':'暂无近期心跳' }}</strong><small>最后活动：{{ time(health.last_heartbeat_at) }}</small></article><article><span>等待 / 处理中</span><strong>{{ health.tasks.queued }} / {{ health.tasks.processing }}</strong><small>仅统计当前项目有效资料</small></article><article><span>失败任务</span><strong>{{ health.tasks.failed }}</strong><small>包含有效资料的历史版本任务</small></article></div><p class="hint">心跳阈值 {{ health.freshness_seconds }} 秒；近期活动不等于任务完成或模型服务健康。后台日志可按任务ID和请求追踪编号关联。</p></template>
+    <div v-if="limits" class="resource-summary"><h3>当前资源上限</h3><p>文件 {{ limits.max_upload_bytes/1048576 }} MB · PDF {{ limits.max_pdf_pages }} 页 · 提取文字 {{ limits.max_text_chars.toLocaleString() }} 字符 · 最多 {{ limits.max_chunks }} 片段</p><p>隔离解析 {{ limits.parse_timeout_seconds }} 秒 · 入库处理预算 {{ limits.processing_timeout_seconds }} 秒。配置调整需在本机重启服务。</p></div>
+  </section><section class="panel"><h2>项目操作审计</h2><p class="muted">记录本次功能上线后的成功操作，仅保存操作者、事件和必要元数据，不保存密码、密钥或资料正文。</p><p v-if="project.role!=='admin'" class="center-empty">项目操作审计仅管理员可查看。</p><template v-else><p v-if="!events.length" class="center-empty">暂无审计事件。既有历史操作不会补造记录。</p><div v-else class="table-wrap"><table class="center-table audit-table"><thead><tr><th>时间 / 操作者</th><th>操作</th><th>对象与追踪</th></tr></thead><tbody><tr v-for="event in events" :key="event.id"><td>{{ time(event.created_at) }}<small>{{ event.actor }}</small></td><td>{{ actions[event.action]||event.action }}<small v-if="event.details.version">v{{ event.details.version }}</small><small v-if="event.details.decrypted">由授权密码解密后保存</small><small v-if="event.details.role">角色：{{ event.details.role }}</small></td><td><small>对象 {{ event.target_id }}</small><small>追踪 {{ event.trace_id||'—' }}</small></td></tr></tbody></table></div><div class="center-pagination"><button class="ghost" :disabled="offset===0" @click="page(-30)">上一页</button><span>第 {{ offset/30+1 }} 页</span><button class="ghost" :disabled="events.length<30" @click="page(30)">下一页</button></div></template></section></div>
+</template>

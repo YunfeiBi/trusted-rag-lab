@@ -11,6 +11,9 @@ from .dependencies import CurrentUser, Db, require_membership
 from .models import Chunk, Document, DocumentVersion, IngestionTask, utcnow
 from .storage import storage_path
 from .runtime import MAX_ATTEMPTS
+from .file_processing import isolated
+from .ingestion import IngestionError
+from .audit import record_event
 
 router = APIRouter(prefix='/api')
 
@@ -54,7 +57,7 @@ def document_output(db, document):
             'latest_version': version_output(db, latest) if latest else None}
 
 
-def save_version(db, settings, user, document, file, consent):
+def save_version(db, settings, user, document, file, consent, pdf_password=None, trace_id=''):
     if not consent:
         raise HTTPException(422, '请确认有权上传，且允许将提取文本发送至已配置的向量服务')
     filename = Path((file.filename or '').replace('\\','/')).name
@@ -63,53 +66,86 @@ def save_version(db, settings, user, document, file, consent):
     suffix = Path(filename).suffix.lower()
     if suffix not in {'.pdf', '.md'}:
         raise HTTPException(415, '仅支持文本型 PDF 和 UTF-8 Markdown')
-    content = file.file.read(settings.max_upload_bytes+1)
-    if not content:
-        raise HTTPException(422, '文件不能为空')
-    if len(content) > settings.max_upload_bytes:
-        raise HTTPException(413, '文件不能超过20MB')
-    if suffix == '.pdf' and not content.startswith(b'%PDF-'):
-        raise HTTPException(422, '文件不是有效的PDF格式')
+    user_id, project_id, document_id, title = user.id, document.project_id, document.id, document.title
+    is_new = document.latest_version == 0
+    db.rollback()  # Never hold project locks while receiving/preparing a large file.
     version_id = uuid.uuid4()
     key = version_id.hex + suffix
     path = storage_path(settings.storage_dir, key)
     path.parent.mkdir(parents=True, exist_ok=True)
-    document.latest_version += 1
-    version = DocumentVersion(id=version_id, document_id=document.id, number=document.latest_version,
-        filename=filename, storage_key=key, file_hash=hashlib.sha256(content).hexdigest(), file_size=len(content), created_by=user.id)
-    task = IngestionTask(id=uuid.uuid4(), version_id=version_id)
+    decoded = storage_path(settings.storage_dir, version_id.hex+'.decoded')
+    decrypted = False
     try:
-        path.write_bytes(content)
+        total = 0
+        with path.open('xb') as output:
+            while block := file.file.read(1024*1024):
+                total += len(block)
+                if total > settings.max_upload_bytes:
+                    raise HTTPException(413, f'文件超过当前上限 {settings.max_upload_bytes//(1024*1024)} MB')
+                if total == len(block) and suffix == '.pdf' and not block.startswith(b'%PDF-'):
+                    raise HTTPException(422, '文件不是有效的PDF格式')
+                output.write(block)
+        if not total:
+            raise HTTPException(422, '文件不能为空')
+        if suffix == '.pdf':
+            decrypted = isolated('prepare',path,settings,destination=decoded,password=pdf_password)
+            if decrypted:
+                decoded.replace(path)
+        pdf_password = None
+        digest = hashlib.sha256()
+        with path.open('rb') as stored:
+            while block := stored.read(1024*1024):
+                digest.update(block)
+        require_membership(db,project_id,user_id,admin=True,lock=True)
+        if is_new:
+            document = Document(id=document_id,project_id=project_id,title=title,latest_version=0)
+            db.add(document)
+            db.flush()
+        else:
+            document = require_document(db,document_id,user_id,admin=True,lock=True)
+        document.latest_version += 1
+        version = DocumentVersion(id=version_id, document_id=document.id, number=document.latest_version,
+            filename=filename, storage_key=key, file_hash=digest.hexdigest(), file_size=path.stat().st_size, created_by=user_id)
+        task = IngestionTask(id=uuid.uuid4(), version_id=version_id)
         db.add(version)
         db.flush()
         db.add(task)
+        record_event(db,project_id,user_id,'document.version_uploaded',str(document_id),trace_id,{'version':version.number,'decrypted':decrypted})
         db.commit()
+    except IngestionError as exc:
+        db.rollback()
+        path.unlink(missing_ok=True)
+        messages = {'PDF_PASSWORD_REQUIRED':'此PDF需要密码，请填写你有权使用的文件密码。','PDF_PASSWORD_INCORRECT':'PDF密码错误，请检查后重新上传。','TOO_MANY_PAGES':'PDF页数超过当前配置上限。','PROCESSING_TIMEOUT':'PDF预处理超时，请拆分文件后重试。','FILE_TOO_LARGE':'解密后PDF超过当前文件大小上限。'}
+        raise HTTPException(422, messages.get(exc.code,'PDF解析或解密失败，请检查文件是否完整。')) from None
     except Exception:
         db.rollback()
         path.unlink(missing_ok=True)
         raise
-    return {'document_id': str(document.id), 'version_id': str(version.id), 'task_id': str(task.id)}
+    finally:
+        pdf_password = None
+        decoded.unlink(missing_ok=True)
+    return {'document_id': str(document.id), 'version_id': str(version.id), 'task_id': str(task.id),'decrypted':decrypted}
 
 
 @router.post('/documents', status_code=202)
 def upload_document(user: CurrentUser, db: Db, request: Request,
     project_id: Annotated[uuid.UUID, Form()], file: Annotated[UploadFile, File()],
     allow_external_processing: Annotated[bool, Form()] = False,
+    pdf_password: Annotated[str | None, Form(max_length=256)] = None,
     title: Annotated[str | None, Form(max_length=200)] = None):
     require_membership(db, project_id, user.id, admin=True, lock=True)
     document = Document(id=uuid.uuid4(), project_id=project_id, title=(title or file.filename or '未命名资料').strip()[:200], latest_version=0)
     if not document.title:
         raise HTTPException(422, '资料标题不能为空')
-    db.add(document)
-    db.flush()
-    return save_version(db, request.app.state.settings, user, document, file, allow_external_processing)
+    return save_version(db, request.app.state.settings, user, document, file, allow_external_processing,pdf_password,request.state.trace_id)
 
 
 @router.post('/documents/{document_id}/versions', status_code=202)
 def upload_version(document_id: uuid.UUID, user: CurrentUser, db: Db, request: Request,
-    file: Annotated[UploadFile, File()], allow_external_processing: Annotated[bool, Form()] = False):
+    file: Annotated[UploadFile, File()], allow_external_processing: Annotated[bool, Form()] = False,
+    pdf_password: Annotated[str | None, Form(max_length=256)] = None):
     document = require_document(db, document_id, user.id, admin=True, lock=True)
-    return save_version(db, request.app.state.settings, user, document, file, allow_external_processing)
+    return save_version(db, request.app.state.settings, user, document, file, allow_external_processing,pdf_password,request.state.trace_id)
 
 
 @router.get('/projects/{project_id}/documents')
@@ -138,7 +174,7 @@ def read_task(task_id: uuid.UUID, user: CurrentUser, db: Db):
 
 
 @router.post('/tasks/{task_id}/retry')
-def retry_task(task_id: uuid.UUID, user: CurrentUser, db: Db):
+def retry_task(task_id: uuid.UUID, user: CurrentUser, db: Db,request:Request):
     task = db.get(IngestionTask, task_id)
     if not task:
         raise HTTPException(404, '任务不存在或不可访问')
@@ -154,12 +190,13 @@ def retry_task(task_id: uuid.UUID, user: CurrentUser, db: Db):
     task.attempts = 0
     task.error_code = task.lease_token = task.lease_until = None
     task.available_at = task.updated_at = utcnow()
+    record_event(db,document.project_id,user.id,'task.retried',task.id,request.state.trace_id)
     db.commit()
     return task_output(task)
 
 
 @router.post('/documents/{document_id}/withdraw')
-def withdraw(document_id: uuid.UUID, user: CurrentUser, db: Db):
+def withdraw(document_id: uuid.UUID, user: CurrentUser, db: Db,request:Request):
     document = require_document(db, document_id, user.id, admin=True, lock=True)
     document.is_active = False
     tasks = db.scalars(select(IngestionTask).join(DocumentVersion).where(DocumentVersion.document_id == document_id, IngestionTask.status.in_(['queued','processing'])).with_for_update(of=IngestionTask)).all()
@@ -168,6 +205,7 @@ def withdraw(document_id: uuid.UUID, user: CurrentUser, db: Db):
         task.lease_token = task.lease_until = None
         task.updated_at = utcnow()
         db.get(DocumentVersion, task.version_id).status = 'cancelled'
+    record_event(db,document.project_id,user.id,'document.withdrawn',document.id,request.state.trace_id)
     db.commit()
     return {'id': str(document.id), 'is_active': False}
 

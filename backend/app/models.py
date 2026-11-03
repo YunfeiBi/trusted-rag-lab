@@ -143,3 +143,39 @@ class QuestionRecord(Base):
     details: Mapped[dict] = mapped_column(JSONB)
     trace_id: Mapped[str] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),default=utcnow)
+
+
+class AuditEvent(Base):
+    __tablename__ = 'audit_events'
+    id: Mapped[uuid.UUID] = mapped_column(Uuid,primary_key=True,default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id'),index=True)
+    actor_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('app_users.id'))
+    action: Mapped[str] = mapped_column(String(64))
+    target_id: Mapped[str] = mapped_column(String(64))
+    details: Mapped[dict] = mapped_column(JSONB)
+    trace_id: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),default=utcnow)
+
+
+class EvaluationCase(Base):
+    __tablename__ = 'evaluation_cases'
+    id: Mapped[uuid.UUID] = mapped_column(Uuid,primary_key=True,default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id'),index=True)
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey('app_users.id'))
+    question: Mapped[str] = mapped_column(Text)
+    answerable: Mapped[bool] = mapped_column(Boolean)
+    gold_chunk_ids: Mapped[list] = mapped_column(JSONB)
+    notes: Mapped[str] = mapped_column(Text)
+    human_confirmed: Mapped[bool] = mapped_column(Boolean)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),default=utcnow)
+
+
+class EvaluationRun(Base):
+    __tablename__ = 'evaluation_runs'
+    id: Mapped[uuid.UUID] = mapped_column(Uuid,primary_key=True,default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id'),index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('app_users.id'))
+    case_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('evaluation_cases.id'))
+    snapshot: Mapped[dict] = mapped_column(JSONB)
+    results: Mapped[list] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),default=utcnow)

@@ -21,13 +21,20 @@ class TextPart:
     line_end: int | None = None
 
 
-def parse_and_chunk(data: bytes, suffix: str, size=800, overlap=120) -> list[TextPart]:
+def parse_and_chunk(data, suffix: str, size=800, overlap=120, *, max_pages=500, max_chars=500_000, max_chunks=1500) -> list[TextPart]:
     if not 0 <= overlap < size:
         raise ValueError('Invalid chunk size')
     parts = []
     if suffix == '.md':
         try:
-            lines = data.decode('utf-8-sig').splitlines()
+            if isinstance(data, bytes):
+                text = data.decode('utf-8-sig')
+            else:
+                with data.open('r',encoding='utf-8-sig') as source:
+                    text = source.read(max_chars+1)
+            if len(text)>max_chars:
+                raise IngestionError('TEXT_TOO_LARGE')
+            lines = text.splitlines()
         except UnicodeDecodeError as exc:
             raise IngestionError('INVALID_UTF8') from exc
         section = ''
@@ -57,10 +64,10 @@ def parse_and_chunk(data: bytes, suffix: str, size=800, overlap=120) -> list[Tex
         flush(len(lines))
     elif suffix == '.pdf':
         try:
-            reader = PdfReader(BytesIO(data))
+            reader = PdfReader(BytesIO(data) if isinstance(data, bytes) else data)
             if reader.is_encrypted:
                 raise IngestionError('ENCRYPTED_PDF')
-            if len(reader.pages) > 200:
+            if len(reader.pages) > max_pages:
                 raise IngestionError('TOO_MANY_PAGES')
             for number, page in enumerate(reader.pages, 1):
                 content = page.get_contents()
@@ -69,6 +76,8 @@ def parse_and_chunk(data: bytes, suffix: str, size=800, overlap=120) -> list[Tex
                 text = (page.extract_text() or '').strip()
                 if text:
                     parts.append(TextPart(text, page=number))
+                    if sum(len(part.text) for part in parts) > max_chars:
+                        raise IngestionError('TEXT_TOO_LARGE')
         except IngestionError:
             raise
         except Exception as exc:
@@ -77,7 +86,7 @@ def parse_and_chunk(data: bytes, suffix: str, size=800, overlap=120) -> list[Tex
         raise IngestionError('UNSUPPORTED_TYPE')
     if not parts:
         raise IngestionError('NO_TEXT')
-    if sum(len(part.text) for part in parts) > 200_000:
+    if sum(len(part.text) for part in parts) > max_chars:
         raise IngestionError('TEXT_TOO_LARGE')
     result = []
     for part in parts:
@@ -85,7 +94,7 @@ def parse_and_chunk(data: bytes, suffix: str, size=800, overlap=120) -> list[Tex
             text = part.text[offset:offset+size].strip()
             if text:
                 result.append(TextPart(text, part.page, part.section, part.line_start, part.line_end))
-                if len(result) > 1000:
+                if len(result) > max_chunks:
                     raise IngestionError('TOO_MANY_CHUNKS')
             if offset + size >= len(part.text):
                 break

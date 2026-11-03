@@ -14,7 +14,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.dialects.postgresql import insert
 
 from backend.app.config import Settings
-from backend.app.ingestion import IngestionError, parse_and_chunk
+from backend.app.ingestion import IngestionError
+from backend.app.file_processing import isolated
 from backend.app.model_client import EmbeddingClient
 from backend.app.models import Chunk, Document, DocumentVersion, IngestionTask, WorkerHeartbeat, utcnow
 from backend.app.storage import storage_path
@@ -97,22 +98,37 @@ class Worker:
             path = storage_path(self.settings.storage_dir, key)
             if not path.is_file():
                 raise IngestionError('FILE_NOT_FOUND')
-            data = path.read_bytes()
-            if len(data) > self.settings.max_upload_bytes:
+            if path.stat().st_size > self.settings.max_upload_bytes:
                 raise IngestionError('FILE_TOO_LARGE')
-            if hashlib.sha256(data).hexdigest() != expected_hash:
+            digest = hashlib.sha256()
+            with path.open('rb') as stored:
+                while block := stored.read(1024*1024):
+                    digest.update(block)
+            if digest.hexdigest() != expected_hash:
                 raise IngestionError('FILE_CHANGED')
             timer = perf_counter()
-            parts = parse_and_chunk(data, path.suffix)
+            parts = isolated('parse', path, self.settings, timeout=min(self.settings.parse_timeout_seconds,self.settings.processing_timeout_seconds))
             parse_ms = (perf_counter()-timer)*1000
             timer = perf_counter()
             vectors = []
             for offset in range(0, len(parts), 8):
+                remaining = self.settings.processing_timeout_seconds-(perf_counter()-start)
+                if remaining <= 0:
+                    raise IngestionError('PROCESSING_TIMEOUT')
                 self.renew(task_id, token, 'embedding')
-                batch = self.model.embed([p.text for p in parts[offset:offset+8]])
+                original_timeout = getattr(self.model,'timeout',None)
+                try:
+                    if original_timeout is not None:
+                        self.model.timeout = min(original_timeout,remaining)
+                    batch = self.model.embed([p.text for p in parts[offset:offset+8]])
+                finally:
+                    if original_timeout is not None:
+                        self.model.timeout = original_timeout
                 if len(batch) != len(parts[offset:offset+8]) or any(len(v) != 1024 for v in batch):
                     raise IngestionError('EMBEDDING_INVALID_RESPONSE')
                 vectors.extend(batch)
+            if perf_counter()-start > self.settings.processing_timeout_seconds:
+                raise IngestionError('PROCESSING_TIMEOUT')
             embedding_ms = (perf_counter()-timer)*1000
             self.renew(task_id, token, 'publishing')
             timer = perf_counter()

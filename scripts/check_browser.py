@@ -80,6 +80,7 @@ async def main():
         await rpc('Emulation.setDeviceMetricsOverride', {'width': 1440, 'height': 1000, 'deviceScaleFactor': 1, 'mobile': False})
         await wait_for("document.querySelector('input[autocomplete=username]') !== null")
         await wait_for("document.querySelector('.service-status')?.textContent.includes('本机服务已就绪')")
+        await wait_for("document.querySelector('.university-emblem')?.naturalWidth > 0")
         await screenshot('login.png')
         records = json.loads((ROOT / '.local' / 'demo_accounts.json').read_text(encoding='utf-8'))
         accounts = {a['username']: a for a in records['accounts']}
@@ -102,6 +103,50 @@ async def main():
             if username == 'demo_member':
                 assert await evaluate("document.querySelector('.member-form') === null"), 'Member management exposed'
             await screenshot(username + '.png')
+            assert await evaluate("document.querySelectorAll('[data-nav]').length===7 && document.querySelector('.sidebar-emblem')?.naturalWidth>0"), 'Seven pages or university emblem missing'
+            if username == 'demo_admin' and '--centers' in sys.argv:
+                report=json.loads((ROOT/'.local/centers-live-check.json').read_text(encoding='utf-8'))
+                await evaluate("Array.from(document.querySelectorAll('.project-card')).find(e=>e.querySelector('h2').textContent==="+json.dumps(report['project_name'])+").click()")
+                await wait_for("!document.querySelector('[data-nav=documents]:disabled')")
+                await evaluate("document.querySelector('[data-nav=documents]').click()")
+                await wait_for("document.querySelector('.pdf-password') !== null && document.querySelectorAll('.documents-table tbody tr').length===2")
+                upload_file=ROOT/'.local/centers-check/synthetic-encrypted.pdf'
+                tree=await rpc('DOM.getDocument')
+                node=await rpc('DOM.querySelector',{'nodeId':tree['root']['nodeId'],'selector':'.upload-area input[type=file]'})
+                await rpc('DOM.setFileInputFiles',{'nodeId':node['nodeId'],'files':[str(upload_file)]})
+                await evaluate("(() => {const p=document.querySelector('.pdf-password');p.value='deliberately-wrong';p.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('.upload-area input[type=checkbox]').click();document.querySelector('.upload-area').requestSubmit()})()")
+                await wait_for("document.querySelector('.document-library .error')?.textContent.includes('密码错误')",attempts=150)
+                assert await evaluate("document.querySelector('.pdf-password').value===''")
+                await asyncio.sleep(3.4)
+                assert await evaluate("document.querySelector('.document-library .error')?.textContent.includes('密码错误')"), 'Polling must not erase upload feedback'
+                await screenshot('pdf-upload-desktop.png')
+                for name,selector in [('tasks','.task-center'),('evaluation','.evaluation-center'),('runtime','.runtime-center'),('search','#evidence-search'),('questions','.question-panel')]:
+                    await evaluate("document.querySelector('[data-nav="+name+"]').click()")
+                    await wait_for("document.querySelector("+json.dumps(selector)+") !== null")
+                    await wait_for("!document.querySelector('[data-nav="+name+"]:disabled')")
+                    assert await evaluate("document.querySelector('main').dataset.page==="+json.dumps(name)+" && document.querySelector('.project-selector').value==="+json.dumps(report['project_id']))
+                    if name=='tasks':
+                        await wait_for("document.querySelectorAll('.task-center tbody tr').length===2")
+                    if name=='evaluation':
+                        await wait_for("document.querySelectorAll('.eval-case').length>0")
+                        assert await evaluate("document.querySelector('.eval-case').textContent.includes('待人工确认') && document.querySelector('.eval-case button').disabled")
+                        previous_cases=await evaluate("document.querySelectorAll('.eval-case').length")
+                        await evaluate("(() => {const select=document.querySelector('.case-form select');const docs=document.querySelectorAll('.case-form select')[1];docs.value=docs.options[1].value;docs.dispatchEvent(new Event('change',{bubbles:true}))})()")
+                        await wait_for("document.querySelector('.gold-picker input') !== null")
+                        await evaluate("(() => {const q=document.querySelector('.case-form input');q.value='浏览器自动合成标注草稿';q.dispatchEvent(new Event('input',{bubbles:true}));const notes=document.querySelector('.case-form textarea');notes.value='AI自动合成测试，未人工确认，不用于正式评测。';notes.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('.gold-picker input').click();document.querySelector('.case-form').requestSubmit()})()")
+                        await wait_for("document.querySelectorAll('.eval-case').length==="+str(previous_cases+1))
+                    if name=='runtime':
+                        await wait_for("document.querySelectorAll('.audit-table tbody tr').length>=4")
+                    if name in {'tasks','evaluation','runtime'}:
+                        await evaluate('window.scrollTo(0,0)')
+                        await screenshot('seven-'+name+'-desktop.png')
+                        await rpc('Emulation.setDeviceMetricsOverride', {'width':390,'height':844,'deviceScaleFactor':1,'mobile':True})
+                        assert await evaluate('document.documentElement.scrollWidth <= 390'), 'Seven-page mobile overflow: '+name
+                        await screenshot('seven-'+name+'-mobile.png')
+                        await rpc('Emulation.setDeviceMetricsOverride', {'width':1440,'height':1000,'deviceScaleFactor':1,'mobile':False})
+                await evaluate("document.querySelector('[data-nav=projects]').click()")
+                await wait_for("document.querySelector('.project-card') !== null && !document.querySelector('[data-nav=projects]:disabled')")
+                print('PASS seven isolated pages, university emblem, password failure clearing, task/audit data, eval draft guard and mobile widths')
             if username == 'demo_admin' and '--runtime' in sys.argv:
                 await evaluate("document.querySelector('[data-nav=documents]').click()")
                 await wait_for("document.querySelector('[data-worker-status=recent_heartbeat]') !== null")
@@ -196,13 +241,13 @@ async def main():
                 await screenshot('documents-page-desktop.png')
                 print('PASS separate pages, project context, back/forward, real QA, citations, private history and mobile navigation')
             await evaluate("Array.from(document.querySelectorAll('button')).find(e=>e.textContent==='退出登录').click()")
-            await wait_for("document.querySelector('input[type=password]') !== null")
+            await wait_for("document.querySelector('.login-card input[type=password]') !== null")
             print('PASS browser login, project scope and logout: ' + username)
         await rpc('Emulation.setDeviceMetricsOverride', {'width': 390, 'height': 844, 'deviceScaleFactor': 1, 'mobile': True})
         await screenshot('login-mobile.png')
         assert await evaluate('document.documentElement.scrollWidth <= window.innerWidth'), 'Mobile horizontal overflow'
         print('PASS mobile login layout width; screenshots in .local/browser-check')
-        (output / 'result.json').write_text(json.dumps({'status': 'passed', 'users_checked': list(accounts), 'ingestion_checked':'--ingestion' in sys.argv, 'search_checked':'--search' in sys.argv, 'questions_checked':'--questions' in sys.argv, 'runtime_checked':'--runtime' in sys.argv, 'checked_at': time.time()}, indent=2), encoding='utf-8')
+        (output / 'result.json').write_text(json.dumps({'status': 'passed', 'users_checked': list(accounts), 'ingestion_checked':'--ingestion' in sys.argv, 'search_checked':'--search' in sys.argv, 'questions_checked':'--questions' in sys.argv, 'runtime_checked':'--runtime' in sys.argv,'centers_checked':'--centers' in sys.argv, 'checked_at': time.time()}, indent=2), encoding='utf-8')
         await rpc('Browser.close')
     finally:
         if session:

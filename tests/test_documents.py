@@ -63,7 +63,7 @@ def test_upload_permissions_validation_and_no_file_leak(environment):
     assert upload(client,ids,owner,name='bad.html').status_code == 415
     assert upload(client,ids,owner,text=b'bad-pdf',name='bad.pdf').status_code == 422
     assert upload(client,ids,owner,text=b'').status_code == 422
-    assert not client.app.state.settings.storage_dir.exists()
+    assert not list(client.app.state.settings.storage_dir.glob('*'))
     with Session(engine) as db:
         assert db.scalar(select(func.count()).select_from(Document)) == 0
 

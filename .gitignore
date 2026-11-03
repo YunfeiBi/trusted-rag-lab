@@ -36,3 +36,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 ~$*
+
+# Original supplied image is preserved locally; the application copy is versioned.
+/重邮校徽.webp

@@ -11,6 +11,7 @@ from .dependencies import CurrentUser, Db, bearer, require_membership
 from .models import LoginSession, Membership, Project, User, utcnow
 from .schemas import LoginInput, LoginOutput, MemberInput, MemberOutput, ProjectInput, ProjectOutput, UserOutput
 from .security import DUMMY_HASH, token_digest, verify_password
+from .audit import record_event
 
 router = APIRouter(prefix='/api')
 
@@ -64,12 +65,13 @@ def list_projects(user: CurrentUser, db: Db):
 
 
 @router.post('/projects', response_model=ProjectOutput, status_code=201)
-def create_project(data: ProjectInput, user: CurrentUser, db: Db):
+def create_project(data: ProjectInput, user: CurrentUser, db: Db, request:Request):
     project = Project(**data.model_dump())
     db.add(project)
     db.flush()
     membership = Membership(project_id=project.id, user_id=user.id, role='admin')
     db.add(membership)
+    record_event(db,project.id,user.id,'project.created',project.id,request.state.trace_id)
     db.commit()
     return project_output(project, membership)
 
@@ -95,7 +97,7 @@ def protect_last_admin(db, project_id, target, new_role):
 
 
 @router.put('/projects/{project_id}/members/{user_id}', response_model=MemberOutput)
-def put_member(project_id: UUID, user_id: UUID, data: MemberInput, user: CurrentUser, db: Db):
+def put_member(project_id: UUID, user_id: UUID, data: MemberInput, user: CurrentUser, db: Db, request:Request):
     require_membership(db, project_id, user.id, admin=True, lock=True)
     target_user = db.get(User, user_id)
     if not target_user or not target_user.is_active:
@@ -106,18 +108,20 @@ def put_member(project_id: UUID, user_id: UUID, data: MemberInput, user: Current
         membership.role = data.role
     else:
         db.add(Membership(project_id=project_id, user_id=user_id, role=data.role))
+    record_event(db,project_id,user.id,'member.updated',user_id,request.state.trace_id,{'role':data.role})
     db.commit()
     return MemberOutput(user=UserOutput.model_validate(target_user), role=data.role)
 
 
 @router.delete('/projects/{project_id}/members/{user_id}', status_code=204)
-def delete_member(project_id: UUID, user_id: UUID, user: CurrentUser, db: Db):
+def delete_member(project_id: UUID, user_id: UUID, user: CurrentUser, db: Db, request:Request):
     require_membership(db, project_id, user.id, admin=True, lock=True)
     target = db.get(Membership, (project_id, user_id))
     if target is None:
         raise HTTPException(404, '成员不存在')
     protect_last_admin(db, project_id, target, None)
     db.delete(target)
+    record_event(db,project_id,user.id,'member.removed',user_id,request.state.trace_id)
     db.commit()
     return Response(status_code=204)
 

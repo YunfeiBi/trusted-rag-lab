@@ -21,6 +21,8 @@ from .model_client import EmbeddingClient, RerankClient
 from .generation import ChatClient
 from .questions import router as questions_router
 from .runtime import router as runtime_router
+from .evaluation import router as evaluation_router
+from .upload_limit import UploadBodyLimit
 
 logger = logging.getLogger('trusted_rag.requests')
 logger.setLevel(logging.INFO)
@@ -62,6 +64,8 @@ def create_app(settings=None, engine=None):
         except Exception as exc:
             logger.error('unhandled_error type=%s trace_id=%s', type(exc).__name__, request.state.trace_id)
             response = error(request, 500, 'INTERNAL_ERROR', '服务内部错误，请凭追踪编号反馈')
+        if getattr(request.state,'upload_too_large',False):
+            response = error(request,413,'UPLOAD_TOO_LARGE','上传请求超过当前大小上限。')
         response.headers['X-Request-ID'] = request.state.trace_id
         response.headers['Cache-Control'] = 'no-store'
         response.headers['X-Content-Type-Options'] = 'nosniff'
@@ -88,6 +92,8 @@ def create_app(settings=None, engine=None):
     application.include_router(search_router)
     application.include_router(questions_router)
     application.include_router(runtime_router)
+    application.include_router(evaluation_router)
+    application.add_middleware(UploadBodyLimit,max_bytes=settings.max_upload_bytes)
     return application
 
 

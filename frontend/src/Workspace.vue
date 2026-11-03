@@ -3,12 +3,20 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import DocumentLibrary from './DocumentLibrary.vue'
 import SearchPanel from './SearchPanel.vue'
 import QuestionPanel from './QuestionPanel.vue'
+import TaskCenter from './TaskCenter.vue'
+import EvaluationCenter from './EvaluationCenter.vue'
+import RuntimeCenter from './RuntimeCenter.vue'
+import emblem from './assets/cqupt-emblem.webp'
+import './centers.css'
 
 const pages = [
   { id:'projects', title:'项目管理', heading:'我的项目', eyebrow:'PROJECT WORKSPACE', icon:'▦', description:'选择项目并管理成员访问权限。' },
   { id:'documents', title:'资料与版本', heading:'资料与版本', eyebrow:'DOCUMENT LIBRARY', icon:'▤', description:'管理当前项目的资料、处理任务和历史版本。' },
   { id:'search', title:'证据检索', heading:'证据检索', eyebrow:'EVIDENCE SEARCH', icon:'⌕', description:'从当前项目的可用资料中检索和核对证据。' },
   { id:'questions', title:'知识问答', heading:'知识问答', eyebrow:'GROUNDED ANSWERS', icon:'◉', description:'依据项目资料回答问题，并查看引用与个人历史。' },
+  { id:'tasks', title:'处理任务中心', heading:'处理任务中心', eyebrow:'INGESTION TASKS', icon:'↻', description:'跟踪异步处理、版本发布与失败恢复。' },
+  { id:'evaluation', title:'评测中心', heading:'评测中心', eyebrow:'EVALUATION LAB', icon:'▥', description:'用人工标注的证据比较检索效果与实际耗时。' },
+  { id:'runtime', title:'运行与审计', heading:'运行与审计', eyebrow:'OPERATIONS & AUDIT', icon:'◎', description:'查看运行活动、资源限制和项目操作记录。' },
 ]
 
 function readRoute() {
@@ -156,12 +164,13 @@ onUnmounted(() => window.removeEventListener('hashchange',syncRoute))
 <template>
   <div v-if="!user" class="login-shell">
     <section class="intro">
+      <div class="university-lockup"><img :src="emblem" alt="重庆邮电大学校徽" class="university-emblem"><div><strong>重庆邮电大学</strong><span>软件体系结构课程项目</span></div></div>
       <div class="brand"><span class="brand-icon">知</span> 知序 <small>Knowledge Workspace</small></div>
       <p class="eyebrow">软件体系结构课程 · 可信 RAG</p>
       <h1>让知识有据可循，<br>让协作有序发生。</h1>
       <p class="intro-text">从项目空间开始，建立资料的访问边界。逐步连接文档、检索和有出处的回答。</p>
       <div class="principles"><span>01 项目隔离</span><span>02 证据溯源</span><span>03 版本可追踪</span></div>
-      <p class="stage-note">项目、资料、检索和问答各有独立页面，共享当前项目的访问边界。</p>
+      <p class="stage-note">七个独立板块连接项目、资料、检索、问答、任务、评测与运行审计。</p>
     </section>
     <section class="login-card">
       <p class="eyebrow">WELCOME BACK</p><h2>进入工作空间</h2><p class="muted">使用本机已创建的账号登录。</p>
@@ -177,14 +186,14 @@ onUnmounted(() => window.removeEventListener('hashchange',syncRoute))
   </div>
   <div v-else class="workspace">
     <aside>
-      <div class="brand"><span class="brand-icon">知</span> 知序</div>
+      <div class="brand workspace-brand"><img :src="emblem" alt="重庆邮电大学校徽" class="sidebar-emblem"><div>知序<small>重庆邮电大学 · 课程项目</small></div></div>
       <p class="sidebar-label">工作空间</p>
       <nav class="desktop-nav" aria-label="主导航"><button v-for="item in pages" :key="item.id" :data-nav="item.id" :class="['nav-link',{ 'nav-active':page===item.id }]" :aria-current="page===item.id ? 'page' : undefined" :disabled="busy" @click="goPage(item.id)">{{ item.icon }}　{{ item.title }}</button></nav>
       <div class="sidebar-bottom"><strong>{{ user.display_name }}</strong><span>{{ user.username }}</span><button class="ghost" :disabled="busy" @click="logout">退出登录</button></div>
     </aside>
     <main :data-page="page">
       <header><div><p class="eyebrow">{{ currentPage.eyebrow }}</p><h1>{{ currentPage.heading }}</h1><p class="muted">{{ currentPage.description }}</p></div><button v-if="page==='projects'" class="primary" :disabled="busy" @click="projectForm = !projectForm">＋ 创建项目</button><button v-else class="ghost" :disabled="busy" @click="run(() => refreshProjects(selected?.id))">刷新项目</button></header>
-      <div class="mobile-session"><span>{{ user.display_name }}</span><button class="ghost" :disabled="busy" @click="logout">退出登录</button></div>
+      <div class="mobile-session"><span class="mobile-identity"><img :src="emblem" alt="重庆邮电大学校徽">{{ user.display_name }}</span><button class="ghost" :disabled="busy" @click="logout">退出登录</button></div>
       <nav class="mobile-navigation" aria-label="移动导航"><button v-for="item in pages" :key="item.id" :data-mobile-nav="item.id" :class="{active:page===item.id}" :disabled="busy" @click="goPage(item.id)">{{ item.title }}</button></nav>
       <div v-if="error" class="error" role="alert">{{ error }}<small v-if="traceId">追踪编号：{{ traceId }}</small></div>
       <div v-if="page !== 'projects' && selected" class="project-context"><label>当前项目<select class="project-selector" :value="selected.id" :disabled="busy" @change="switchProject"><option v-for="project in projects" :key="project.id" :value="project.id">{{ project.name }}</option></select></label><span :class="['badge',{admin:isAdmin}]">{{ isAdmin ? '项目管理员' : '项目成员' }}</span></div>
@@ -216,6 +225,9 @@ onUnmounted(() => window.removeEventListener('hashchange',syncRoute))
         <DocumentLibrary v-if="page==='documents'" :key="'docs-'+selected.id" :project="selected" :api="api" />
         <SearchPanel v-else-if="page==='search'" :key="'search-'+selected.id" :project="selected" :api="api" />
         <QuestionPanel v-else-if="page==='questions'" :key="'qa-'+selected.id" :project="selected" :api="api" />
+        <TaskCenter v-else-if="page==='tasks'" :key="'tasks-'+selected.id" :project="selected" :api="api" />
+        <EvaluationCenter v-else-if="page==='evaluation'" :key="'eval-'+selected.id" :project="selected" :api="api" />
+        <RuntimeCenter v-else-if="page==='runtime'" :key="'runtime-'+selected.id" :project="selected" :api="api" />
       </template>
       <section v-else class="panel empty"><h2>请先选择一个项目</h2><p class="muted">创建或加入项目后，才能访问相应资料和问答。</p><button class="primary" @click="goPage('projects')">前往项目管理</button></section>
       <footer>本机课程原型 · AI 辅助开发及人工核验记录见项目文档</footer>
@@ -230,6 +242,7 @@ onUnmounted(() => window.removeEventListener('hashchange',syncRoute))
 .workspace aside{position:sticky;top:0;height:100vh;align-self:start}.desktop-nav{display:flex;flex-direction:column;gap:8px}.nav-link{border:0;background:transparent;text-align:left;border-radius:7px;padding:14px;color:#6d7b8c;font-size:13px}.nav-link:hover{background:#f4f6f9}.nav-link.nav-active{background:#edf1f7;color:#344f78;font-weight:700;margin-bottom:0}.project-context{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:24px;background:#edf1f6;border:1px solid #e0e6ee;border-radius:9px;padding:17px 20px}.project-context label{margin:0;min-width:0;flex:1;max-width:550px}.project-context select{background:#fff}.project-context>.badge{flex-shrink:0}.mobile-navigation{display:none}@media(max-width:900px){.workspace aside{display:none}.mobile-navigation{display:flex;gap:8px;overflow:auto;margin-bottom:22px;padding-bottom:4px}.mobile-navigation button{border:1px solid #dce3ed;color:#708299;background:#fff;padding:10px;border-radius:6px;font-size:12px;white-space:nowrap}.mobile-navigation button.active{background:#344f78;border-color:#344f78;color:#fff}.project-context{padding:14px;gap:10px}.project-context>.badge{font-size:10px}}
 </style>
 <style>
+.university-lockup{display:flex;align-items:center;gap:17px;margin-bottom:32px}.university-emblem{width:72px;height:72px;object-fit:contain}.university-lockup strong{display:block;font-size:19px;letter-spacing:3px;color:#365f4e}.university-lockup span{display:block;font-size:11px;color:#829287;margin-top:9px;letter-spacing:1px}.intro .brand{margin-bottom:40px!important}.sidebar-emblem{width:42px;height:48px;object-fit:contain;flex-shrink:0}.workspace-brand{gap:10px!important;padding-left:2px!important}.workspace-brand small{display:block;font-size:9px!important;letter-spacing:0;margin-top:7px;white-space:nowrap}.mobile-identity{display:flex;align-items:center;gap:10px}.mobile-identity img{width:28px;height:32px;object-fit:contain}.desktop-nav{gap:3px!important}.desktop-nav .nav-link{padding:12px 14px}.sidebar-label{margin-top:30px!important}.mobile-navigation{flex-wrap:wrap!important;overflow:visible!important}.mobile-navigation button{flex:1 0 auto}@media(max-width:650px){.university-lockup{margin-bottom:24px}.university-emblem{width:54px;height:54px}.university-lockup strong{font-size:16px}.intro .brand{margin-bottom:24px!important}}
 .mobile-session { display: none; }
 header > button { flex-shrink: 0; white-space: nowrap; }
 .nav-library { border: 0; background: transparent; color: #53647b; text-align: left; padding: 14px; font-size: 13px; border-radius: 7px; }
