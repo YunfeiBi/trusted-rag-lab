@@ -154,9 +154,29 @@ async def main():
             await evaluate("Array.from(document.querySelectorAll('.team-review button')).find(e=>e.textContent==='批准加入').click()")
             await wait_for("document.querySelectorAll('.team-person').length===2")
             await screenshot('team-members-desktop.png')
-            await evaluate("document.querySelector('.profile-button').click()")
+            await evaluate("document.querySelector('.profile-button').focus();document.querySelector('.profile-button').click()")
+            await wait_for("document.querySelector('dialog[open] .profile-form') !== null")
+            assert await evaluate("document.activeElement===document.querySelector('.profile-form input') && document.body.style.overflow==='hidden' && !document.querySelector('main > .profile-form')"), 'Profile should open as a focused modal'
+            await fill('.profile-form input','尚未保存的名称')
+            await rpc('Input.dispatchKeyEvent', {'type':'keyDown','key':'Escape','code':'Escape','windowsVirtualKeyCode':27})
+            await rpc('Input.dispatchKeyEvent', {'type':'keyUp','key':'Escape','code':'Escape','windowsVirtualKeyCode':27})
+            await wait_for("document.querySelector('dialog')===null && document.body.style.overflow!== 'hidden'")
+            assert await evaluate("document.activeElement===document.querySelector('.profile-button')"), 'Closing modal should restore focus'
+            await evaluate("document.querySelector('.profile-button').focus();document.querySelector('.profile-button').click()")
+            await wait_for("document.querySelector('dialog[open] .profile-form') !== null")
+            assert await evaluate("document.querySelector('.profile-form input').value!=='尚未保存的名称'"), 'Escape must discard unsaved draft'
+            await fill('.profile-form input[type=email]',member_email)
+            await evaluate("document.querySelector('.profile-form').requestSubmit()")
+            await wait_for("document.querySelector('dialog[open] .error') !== null && !document.querySelector('.profile-form fieldset:disabled')")
+            assert await evaluate("document.querySelector('.profile-form input[type=email]').value==="+json.dumps(member_email)), 'Failed save should preserve input'
+            await screenshot('profile-modal-error.png')
+            await rpc('Emulation.setDeviceMetricsOverride', {'width':390,'height':844,'deviceScaleFactor':1,'mobile':True})
+            assert await evaluate("document.documentElement.scrollWidth<=390 && document.querySelector('dialog').getBoundingClientRect().right<=390")
+            await screenshot('profile-modal-mobile.png')
+            await rpc('Emulation.setDeviceMetricsOverride', {'width':1440,'height':1000,'deviceScaleFactor':1,'mobile':False})
             await fill('.profile-form input','合成教师（测试账号）')
             await fill('.profile-form input[type=email]',updated_email)
+            await screenshot('profile-modal-desktop.png')
             await evaluate("document.querySelector('.profile-form').requestSubmit()")
             await wait_for("!document.querySelector('.profile-form') && !document.querySelector('header button.primary:disabled')")
             await evaluate("document.querySelector('header button.primary').click()")
@@ -164,10 +184,23 @@ async def main():
             await fill('.create-form textarea','自动合成测试项目；邮箱为未验证测试别名，不发送邮件。')
             await evaluate("document.querySelector('.create-form').requestSubmit()")
             await wait_for("document.querySelectorAll('.project-card').length===1 && document.querySelector('.edit-project-button') && !document.querySelector('header button.primary:disabled')")
+            await evaluate("document.querySelector('.project-card-edit').click()")
+            await wait_for("document.querySelector('dialog[open] .edit-project-form') !== null")
+            assert await evaluate("document.activeElement===document.querySelector('.edit-project-form input')"), 'Project edit should focus name field'
+            await fill('.edit-project-form input','取消的项目名称')
+            await evaluate("document.querySelector('.edit-project-form .ghost').click()")
+            await wait_for("document.querySelector('dialog')===null")
+            assert await evaluate("!document.querySelector('.project-card h2').textContent.includes('取消的项目名称')"), 'Cancel must not save project'
             await evaluate("document.querySelector('.edit-project-button').click()")
+            await wait_for("document.querySelector('dialog[open] .edit-project-form') !== null")
             renamed='已修改的合成项目-'+suffix
             await fill('.edit-project-form input',renamed)
             await fill('.edit-project-form textarea','通过浏览器修改的项目说明，保持成员与项目ID不变。')
+            await screenshot('project-modal-desktop.png')
+            await rpc('Emulation.setDeviceMetricsOverride', {'width':390,'height':844,'deviceScaleFactor':1,'mobile':True})
+            assert await evaluate('document.documentElement.scrollWidth<=390')
+            await screenshot('project-modal-mobile.png')
+            await rpc('Emulation.setDeviceMetricsOverride', {'width':1440,'height':1000,'deviceScaleFactor':1,'mobile':False})
             await evaluate("document.querySelector('.edit-project-form').requestSubmit()")
             await wait_for("document.querySelector('.project-card h2')?.textContent==="+json.dumps(renamed)+" && !document.querySelector('.edit-project-form')")
             await fill('.member-form input',member_name)
@@ -180,7 +213,7 @@ async def main():
             await fill('input[autocomplete=current-password]',test_password)
             await evaluate("document.querySelector('.auth-form').requestSubmit()")
             await wait_for("document.querySelectorAll('.members-table tbody tr').length===2 && !document.querySelector('header button.primary:disabled')")
-            assert await evaluate("!document.querySelector('.member-form') && !document.querySelector('.edit-project-button') && !document.querySelector('.members-table .danger-link')"), 'Member must only view contacts'
+            assert await evaluate("!document.querySelector('.member-form') && !document.querySelector('.edit-project-button') && !document.querySelector('.project-card-edit') && !document.querySelector('.members-table .danger-link')"), 'Member must only view contacts'
             assert await evaluate("Array.from(document.querySelectorAll('.members-table a')).some(e=>e.getAttribute('href')==="+json.dumps('mailto:'+updated_email)+")"), 'Shared QQ mailto contact missing'
             await wait_for("document.querySelectorAll('.team-person').length===2")
             assert await evaluate("document.querySelector('.team-create-form')===null"), 'Students must not get a team creation form'

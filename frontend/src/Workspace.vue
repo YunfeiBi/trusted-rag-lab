@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import FormDialog from './FormDialog.vue'
 import DocumentLibrary from './DocumentLibrary.vue'
 import SearchPanel from './SearchPanel.vue'
 import QuestionPanel from './QuestionPanel.vue'
@@ -43,6 +44,9 @@ const profileName = ref('')
 const profileEmail = ref('')
 const profileIdentity = ref('')
 const editingProject = ref(false)
+const editTarget = ref(null)
+const formError = ref('')
+const formTrace = ref('')
 const editName = ref('')
 const editDescription = ref('')
 const projects = ref([])
@@ -157,26 +161,43 @@ function register() {
 }
 
 function openProfile() {
+  formError.value = ''; formTrace.value = '';
   profileName.value = user.value.display_name; profileEmail.value = user.value.qq_email || ''; profileIdentity.value=['teacher','student'].includes(user.value.academic_identity)?user.value.academic_identity:''; profileForm.value = true
 }
 
+async function saveDialog(action) {
+  if (busy.value) return
+  busy.value = true; formError.value = ''; formTrace.value = ''
+  try { await action() }
+  catch (e) {
+    if (user.value) {
+      formError.value = e instanceof TypeError ? '无法连接服务，请稍后重试。' : e.message
+      formTrace.value = e.traceId || ''
+    }
+  } finally { busy.value = false }
+}
+
 function saveProfile() {
-  return run(async () => {
+  return saveDialog(async () => {
     user.value = await api('/auth/me',{method:'PATCH',body:JSON.stringify({display_name:profileName.value,qq_email:profileEmail.value,academic_identity:profileIdentity.value})})
-    profileForm.value = false
     await refreshProjects(selected.value?.id)
+    profileForm.value = false
   })
 }
 
-function editProject() {
-  editName.value = selected.value.name; editDescription.value = selected.value.description; editingProject.value = true
+function editProject(project) {
+  if (busy.value || project?.role !== 'admin' || project.is_team_library) return
+  editTarget.value = project
+  editName.value = project.name; editDescription.value = project.description
+  formError.value = ''; formTrace.value = ''; editingProject.value = true
 }
 
 function saveProject() {
-  return run(async () => {
-    const id = selected.value.id
-    await api('/projects/'+id,{method:'PATCH',body:JSON.stringify({name:editName.value,description:editDescription.value})})
-    await refreshProjects(id)
+  return saveDialog(async () => {
+    const id = editTarget.value.id
+    const updated = await api('/projects/'+id,{method:'PATCH',body:JSON.stringify({name:editName.value,description:editDescription.value})})
+    projects.value = projects.value.map(project => project.id === id ? updated : project)
+    if (selected.value?.id === id) selected.value = updated
     editingProject.value = false
   })
 }
@@ -252,7 +273,7 @@ onUnmounted(() => window.removeEventListener('hashchange',syncRoute))
         <label>密码<input v-model="password" type="password" required :minlength="authMode==='register'?8:1" maxlength="128" :autocomplete="authMode==='register'?'new-password':'current-password'" :placeholder="authMode==='register'?'8—128位密码':'输入密码'"></label>
         <label v-if="authMode==='register'">确认密码<input v-model="confirmPassword" class="confirm-password" type="password" required minlength="8" maxlength="128" autocomplete="new-password" placeholder="再次输入密码"></label>
         <p v-if="authMode==='register'" class="hint">QQ邮箱会用于团队入组审批及师生通讯录，当前不发送验证邮件。学生不能创建团队，自行选择教师也需本机管理员确认身份。</p>
-        <div v-if="error" class="error" role="alert">{{ error }}<small v-if="traceId">追踪编号：{{ traceId }}</small></div>
+        <div v-if="error && !profileForm && !editingProject" class="error" role="alert">{{ error }}<small v-if="traceId">追踪编号：{{ traceId }}</small></div>
         <button class="primary full" :disabled="busy">{{ busy ? '正在提交…' : authMode==='register'?'注册账号':'登录工作空间 →' }}</button>
       </form>
       <button class="auth-switch" :disabled="busy" @click="switchAuth">{{ authMode==='register'?'已有账号？返回登录':'还没有账号？注册账号' }}</button>
@@ -270,8 +291,8 @@ onUnmounted(() => window.removeEventListener('hashchange',syncRoute))
       <header><div><p class="eyebrow">{{ currentPage.eyebrow }}</p><h1>{{ currentPage.heading }}</h1><p class="muted">{{ currentPage.description }}</p></div><button v-if="page==='projects'" class="primary" :disabled="busy||!activeTeam" @click="projectForm = !projectForm">＋ 创建项目</button><button v-else class="ghost" :disabled="busy" @click="run(() => refreshProjects(selected?.id))">刷新项目</button></header>
       <div class="mobile-session"><span class="mobile-identity"><img :src="emblem" alt="重庆邮电大学校徽">{{ user.display_name }}</span><div class="mobile-account-actions"><button class="ghost" :disabled="busy" @click="openProfile">个人资料</button><button class="ghost" :disabled="busy" @click="logout">退出登录</button></div></div>
       <nav class="mobile-navigation" aria-label="移动导航"><button v-for="item in pages" :key="item.id" :data-mobile-nav="item.id" :class="{active:page===item.id}" :disabled="busy" @click="goPage(item.id)">{{ item.title }}</button></nav>
-      <div v-if="error" class="error" role="alert">{{ error }}<small v-if="traceId">追踪编号：{{ traceId }}</small></div>
-      <form v-if="profileForm" class="panel profile-form" @submit.prevent="saveProfile"><h2>个人资料</h2><p class="muted">用户名：{{ user.username }}。显示名称和QQ邮箱会出现在所属团队与项目的通讯录中。</p><p class="hint">身份：{{ user.teacher_verified?'教师（已确认）':user.academic_identity==='teacher'?'教师身份待本机管理员确认':user.academic_identity==='student'?'学生':'身份待补充' }}</p><label>成员身份<select v-model="profileIdentity" required :disabled="user.teacher_verified"><option value="" disabled>请选择你的身份</option><option value="student">学生</option><option value="teacher">教师（需本机管理员确认）</option></select></label><label>显示名称<input v-model="profileName" required maxlength="100"></label><label>QQ邮箱<input v-model="profileEmail" type="email" required maxlength="80" placeholder="你的QQ邮箱@qq.com"></label><p class="hint">邮箱由本人填写，尚未通过邮件验证。已有账号未填写时，通讯录显示“未填写”。</p><div class="actions"><button type="button" class="ghost" @click="profileForm=false">取消</button><button class="primary" :disabled="busy">保存个人资料</button></div></form>
+      <div v-if="error && !profileForm && !editingProject" class="error" role="alert">{{ error }}<small v-if="traceId">追踪编号：{{ traceId }}</small></div>
+
       <div v-if="page !== 'projects' && selected" class="project-context"><label>{{ activeTeam?.name }} · 当前资料范围<select class="project-selector" :value="selected.id" :disabled="busy" @change="switchProject"><option v-for="project in scopeProjects" :key="project.id" :value="project.id">{{ project.name }}{{ project.is_team_library?'（全团队公共）':'' }}</option></select></label><span :class="['badge',{admin:isAdmin}]">{{ isAdmin ? '资料管理员' : '只读成员' }}</span></div>
       <template v-if="page==='projects'">
       <TeamWorkspace :teams="teams" :active="activeTeam" :user="user" :api="api" @select="teamChanged" @changed="teamChanged()" @created="teamCreated" @library="openLibrary" />
@@ -282,14 +303,17 @@ onUnmounted(() => window.removeEventListener('hashchange',syncRoute))
       </form>
       <div v-if="activeTeam&&!visibleProjects.length&&!busy" class="panel empty"><h2>当前团队暂无你参与的内部项目</h2><p class="muted">你可以先访问团队公共资料；内部项目需由项目管理员授权，也可以在当前团队创建自己的项目。</p></div>
       <section class="project-grid" aria-label="项目列表">
-        <button v-for="project in visibleProjects" :key="project.id" :class="['project-card', { selected: selected?.id === project.id }]" :disabled="busy" @click="run(() => selectProject(project))">
+        <div v-for="project in visibleProjects" :key="project.id" class="project-card-shell">
+        <button :class="['project-card', { selected: selected?.id === project.id }]" :disabled="busy" @click="run(() => selectProject(project))">
           <div class="card-top"><span class="folder">▱</span><span :class="['badge', { admin: project.role === 'admin' }]">{{ project.role === 'admin' ? '管理员' : '成员' }}</span></div>
           <h2>{{ project.name }}</h2><p>{{ project.description || '暂无项目说明' }}</p><span class="card-bottom">{{ selected?.id === project.id ? '当前项目' : '查看项目' }} →</span>
         </button>
+        <button v-if="project.role==='admin'" class="ghost project-card-edit" :aria-label="'编辑项目 '+project.name" :disabled="busy" @click="editProject(project)">编辑</button>
+        </div>
       </section>
       <section v-if="selected&&!selected.is_team_library" class="panel">
-        <div class="section-heading"><div><p class="eyebrow">ACCESS & MEMBERS</p><h2>{{ selected.name }} · 项目成员</h2></div><div class="project-actions"><button v-if="isAdmin" class="ghost edit-project-button" :disabled="busy" @click="editProject">编辑项目</button><button class="ghost" :disabled="busy" @click="run(() => refreshProjects(selected.id))">刷新</button></div></div>
-        <form v-if="isAdmin&&editingProject" class="edit-project-form" @submit.prevent="saveProject"><label>项目名称<input v-model="editName" required maxlength="100"></label><label>项目说明<textarea v-model="editDescription" maxlength="2000" rows="3"></textarea></label><div class="actions"><button type="button" class="ghost" @click="editingProject=false">取消</button><button class="primary" :disabled="busy">保存项目</button></div></form>
+        <div class="section-heading"><div><p class="eyebrow">ACCESS & MEMBERS</p><h2>{{ selected.name }} · 项目成员</h2></div><div class="project-actions"><button v-if="isAdmin" class="ghost edit-project-button" :disabled="busy" @click="editProject(selected)">编辑项目</button><button class="ghost" :disabled="busy" @click="run(() => refreshProjects(selected.id))">刷新</button></div></div>
+
         <p v-if="!isAdmin" class="muted">你可以查看本项目成员与联系邮箱，成员和项目设置由管理员维护。</p>
         <template v-if="isAdmin">
           <p class="muted">添加已存在的本机账号。撤销成员后，其现有会话也将失去本项目访问权限。</p>
@@ -309,13 +333,20 @@ onUnmounted(() => window.removeEventListener('hashchange',syncRoute))
         <RuntimeCenter v-else-if="page==='runtime'" :key="'runtime-'+selected.id" :project="selected" :api="api" />
       </template>
       <section v-else class="panel empty"><h2>请先选择一个项目</h2><p class="muted">创建或加入项目后，才能访问相应资料和问答。</p><button class="primary" @click="goPage('projects')">前往项目管理</button></section>
+      <FormDialog v-if="profileForm" id="profile-dialog" title="个人资料" :busy="busy" @close="profileForm=false">
+        <form class="profile-form" @submit.prevent="saveProfile"><fieldset class="dialog-fields" :disabled="busy"><p class="muted">用户名：{{ user.username }}。显示名称和QQ邮箱会出现在所属团队与项目的通讯录中。</p><p class="hint">身份：{{ user.teacher_verified?'教师（已确认）':user.academic_identity==='teacher'?'教师身份待本机管理员确认':user.academic_identity==='student'?'学生':'身份待补充' }}</p><label>成员身份<select v-model="profileIdentity" required :disabled="user.teacher_verified"><option value="" disabled>请选择你的身份</option><option value="student">学生</option><option value="teacher">教师（需本机管理员确认）</option></select></label><label>显示名称<input v-model="profileName" autofocus required maxlength="100"></label><label>QQ邮箱<input v-model="profileEmail" type="email" required maxlength="80" placeholder="你的QQ邮箱@qq.com"></label><p class="hint">邮箱由本人填写，尚未通过邮件验证。已有账号未填写时，通讯录显示“未填写”。</p><p v-if="formError" class="error" role="alert">{{ formError }}<small v-if="formTrace">追踪编号：{{ formTrace }}</small></p><div class="actions"><button type="button" class="ghost" :disabled="busy" @click="profileForm=false">取消</button><button class="primary" :disabled="busy">{{ busy ? '正在保存…' : '保存个人资料' }}</button></div></fieldset></form>
+      </FormDialog>
+      <FormDialog v-if="editingProject && editTarget" id="project-dialog" title="编辑科研项目" :busy="busy" @close="editingProject=false">
+        <p class="muted">修改项目名称和说明，保存后对项目成员生效。</p>
+        <form class="edit-project-form" @submit.prevent="saveProject"><fieldset class="dialog-fields" :disabled="busy"><label>项目名称<input v-model="editName" autofocus required maxlength="100"></label><label>项目说明<textarea v-model="editDescription" maxlength="2000" rows="3"></textarea></label><p v-if="formError" class="error" role="alert">{{ formError }}<small v-if="formTrace">追踪编号：{{ formTrace }}</small></p><div class="actions"><button type="button" class="ghost" :disabled="busy" @click="editingProject=false">取消</button><button class="primary" :disabled="busy">{{ busy ? '正在保存…' : '保存项目' }}</button></div></fieldset></form>
+      </FormDialog>
       <footer>本机课程原型 · AI 辅助开发及人工核验记录见项目文档</footer>
     </main>
   </div>
 </template>
 
 <style>
-.auth-switch{display:block;margin:20px auto 0;border:0;background:none;color:#476890;font-size:13px;padding:8px}.auth-success{padding:12px 15px;border:1px solid #d5e5db;background:#f3faf6;border-radius:7px;color:#4d7b63;font-size:12px}.project-actions,.mobile-account-actions{display:flex;gap:8px;flex-shrink:0}.edit-project-form{padding:20px;background:#f7f9fc;border:1px solid #e2e9f1;border-radius:8px;margin:20px 0}.members-table a{color:#476b96}.profile-form{max-width:700px}.mobile-account-actions button{padding:8px;font-size:11px}@media(max-width:600px){.members-table{min-width:620px}.project-actions{flex-wrap:wrap;justify-content:flex-end}.project-actions button{font-size:11px;padding:8px}}
+.auth-switch{display:block;margin:20px auto 0;border:0;background:none;color:#476890;font-size:13px;padding:8px}.auth-success{padding:12px 15px;border:1px solid #d5e5db;background:#f3faf6;border-radius:7px;color:#4d7b63;font-size:12px}.project-actions,.mobile-account-actions{display:flex;gap:8px;flex-shrink:0}.edit-project-form{margin:0}.members-table a{color:#476b96}.profile-form{margin:0}.profile-form>.hint{margin-bottom:20px}.dialog-fields{border:0;padding:0;margin:0;min-width:0}.form-dialog .actions{margin-top:24px;flex-wrap:wrap}.project-card-shell{position:relative;min-width:0}.project-card-shell>.project-card{width:100%;height:100%}.project-card-shell>.project-card-edit{position:absolute;right:18px;bottom:17px;font-size:12px;padding:6px 12px}.mobile-account-actions button{padding:8px;font-size:11px}@media(max-width:600px){.members-table{min-width:620px}.project-actions{flex-wrap:wrap;justify-content:flex-end}.project-actions button{font-size:11px;padding:8px}}
 :root{font-family:Inter,"Segoe UI","Microsoft YaHei",sans-serif;color:#233343;background:#f5f6f8;font-synthesis:none;font-size:14px}*{box-sizing:border-box}body{margin:0}button,input,textarea,select{font:inherit}button{cursor:pointer}button:disabled{cursor:wait;opacity:.65}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:3px solid #acbdec;outline-offset:2px}button{transition:background .15s,box-shadow .15s}h1,h2,p{margin-top:0}h1{font-size:32px;letter-spacing:-1px;margin-bottom:12px}h2{font-size:19px;margin-bottom:12px}p{line-height:1.8}small{font-size:12px}.brand{display:flex;align-items:center;gap:10px;font-size:23px;font-weight:750;letter-spacing:2px}.brand small{font-weight:400;font-size:12px;letter-spacing:0;color:#6c7b8c}.brand-icon{display:grid;place-items:center;width:36px;height:36px;color:white;background:#344f78;border-radius:10px;font-size:20px}.eyebrow{font-size:11px;font-weight:700;letter-spacing:2px;color:#6b7e97;margin-bottom:12px}.muted{color:#6d7b8c}.hint{font-size:12px;line-height:1.8;color:#788595;margin:18px 0 0}.primary{border:0;border-radius:7px;background:#344f78;color:white;padding:12px 18px;font-weight:600}.primary:hover{background:#253e63}.full{width:100%;margin-top:8px}.ghost{border:1px solid #dce1e7;background:white;padding:9px 14px;border-radius:7px;color:#53647b}.ghost:hover{background:#f4f6f9}.login-shell{min-height:100vh;display:grid;grid-template-columns:1.2fr 1fr;align-items:center;gap:70px;max-width:1180px;padding:70px 50px;margin:auto}.intro .brand{margin-bottom:78px}.intro h1{font-size:43px;line-height:1.45;letter-spacing:-1.5px}.login-card{background:white;border:1px solid #e4e7ed;border-radius:16px;padding:40px;box-shadow:0 15px 60px #26395208}.login-card h2{font-size:25px}.login-card form{margin-top:30px}label{display:block;font-size:12px;font-weight:600;color:#526176;margin-bottom:18px}input,textarea,select{display:block;width:100%;margin-top:8px;border:1px solid #d9dfe7;border-radius:7px;padding:12px;background:white;color:#233343}input::placeholder,textarea::placeholder{color:#9aa4b1}textarea{resize:vertical}.service-status{border-top:1px solid #edf0f4;margin-top:26px;padding-top:19px;font-size:12px;color:#7c8796;display:flex;align-items:center;gap:8px}.dot{height:7px;width:7px;border-radius:50%;background:#c89448}.dot.green{background:#5b9e80}.error{border:1px solid #f1d4d1;background:#fff4f2;color:#9f4037;padding:12px 16px;border-radius:7px;line-height:1.7;margin-bottom:20px}.error small{display:block;overflow-wrap:anywhere}.workspace{min-height:100vh;display:grid;grid-template-columns:225px 1fr}.workspace aside{background:#fff;border-right:1px solid #e5e8ed;padding:30px 20px;display:flex;flex-direction:column}.workspace aside .brand{padding-left:12px}.sidebar-label{font-size:11px;color:#97a0ad;letter-spacing:2px;margin:48px 14px 16px}.nav-active,.nav-future{padding:14px;border-radius:7px;font-size:13px;margin-bottom:8px}.nav-active{background:#edf1f7;color:#344f78;font-weight:700}.nav-future{color:#98a1af}.nav-future small{font-size:10px;margin-left:8px}.sidebar-bottom{margin-top:auto;padding:55px 14px 0;display:flex;flex-direction:column;gap:8px}.sidebar-bottom span{color:#8792a2;font-size:12px}.sidebar-bottom button{margin-top:12px}.workspace main{padding:48px 50px;max-width:1350px;width:100%;margin:auto}header,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:24px}header{margin-bottom:24px}.project-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:20px;margin-bottom:30px}.project-card{border:1px solid #e1e5eb;background:white;border-radius:11px;padding:24px;text-align:left;color:inherit}.project-card:hover{box-shadow:0 6px 22px #2333430b}.project-card.selected{border:1px solid #6382ac;box-shadow:0 0 0 2px #6382ac16}.card-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}.folder{color:#607c9f;font-size:30px}.badge{border-radius:5px;background:#f0f2f5;padding:5px 9px;font-size:11px;color:#798698}.badge.admin{background:#edf2fa;color:#4b6c99}.project-card h2{font-size:18px}.project-card p{color:#7a8795;min-height:48px;font-size:12px;overflow-wrap:anywhere}.card-bottom{font-size:11px;color:#6d809a}.panel{background:white;border:1px solid #e1e5eb;padding:27px;border-radius:11px;margin-bottom:25px}.panel .section-heading h2{margin-bottom:10px}.member-form{display:grid;grid-template-columns:1fr 155px auto;gap:16px;align-items:end;margin:24px 0}.member-form label{margin:0}.member-form button{height:44px}.table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px;white-space:nowrap}th,td{text-align:left;padding:16px 12px;border-bottom:1px solid #edf0f4}th{background:#f9fafc;color:#8b97a6;font-size:11px;font-weight:500}.danger-link{border:0;background:transparent;color:#a95e56;font-size:12px;padding:5px 0}.actions{display:flex;justify-content:flex-end;gap:12px}.empty{text-align:center;padding:45px}footer{font-size:11px;color:#9aa3af;margin-top:35px;line-height:1.8}@media(max-width:900px){.login-shell{grid-template-columns:1fr;max-width:550px;gap:30px;padding:35px 20px}.intro .brand{margin-bottom:32px}.intro h1{font-size:30px}.principles,.workspace{grid-template-columns:1fr}.workspace aside{display:none}.workspace main{padding:28px 18px}.member-form{grid-template-columns:1fr}.login-card{padding:28px}header{align-items:flex-start}header h1{font-size:27px}}
 
 /* Calm, layered canvas shared by sign-in and registration. */
