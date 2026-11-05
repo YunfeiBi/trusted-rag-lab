@@ -62,8 +62,8 @@ async def main():
                         raise RuntimeError('Browser protocol call failed')
                     return payload.get('result', {})
 
-        async def evaluate(expression):
-            payload = await rpc('Runtime.evaluate', {'expression': expression, 'returnByValue': True})
+        async def evaluate(expression, user_gesture=False):
+            payload = await rpc('Runtime.evaluate', {'expression': expression, 'returnByValue': True, 'userGesture': user_gesture})
             if 'exceptionDetails' in payload:
                 raise RuntimeError('Browser evaluation failed')
             return payload.get('result', {}).get('value')
@@ -116,13 +116,14 @@ async def main():
             subprocess.run([str(ROOT/'.venv/Scripts/python.exe'),'-m','backend.teacher_accounts','approve',owner_name],cwd=ROOT,check=True,stdout=subprocess.DEVNULL)
             await fill('input[autocomplete=current-password]',test_password)
             await evaluate("document.querySelector('.auth-form').requestSubmit()")
-            await wait_for("document.querySelector('main[data-page=projects]') && document.querySelector('.team-create-form') && !document.querySelector('[data-nav=projects]:disabled')")
+            await wait_for("document.querySelector('main[data-page=projects]') && document.querySelector('.team-create-button') && !document.querySelector('[data-nav=projects]:disabled')")
             assert await evaluate("document.querySelectorAll('.project-card').length===0"), 'Registration must not grant project access'
+            await evaluate("document.querySelector('.team-create-button').click()")
+            await wait_for("document.querySelector('dialog[open] .team-create-form') !== null")
             await fill('.team-create-form input','浏览器合成实验团队-'+suffix)
             await fill('.team-create-form textarea','模拟教师/学生组织测试，不代表真实教师身份或真实团队。')
             await evaluate("document.querySelector('.team-create-form').requestSubmit()")
             await wait_for("document.querySelector('.team-code') !== null && !document.querySelector('header button.primary:disabled')")
-            team_code=await evaluate("document.querySelector('.team-code').textContent")
             with httpx.Client(base_url='http://127.0.0.1:8000/api',timeout=10) as client:
                 auth=client.post('/auth/login',json={'username':member_name,'password':test_password});auth.raise_for_status()
                 member_headers={'Authorization':'Bearer '+auth.json()['access_token']}
@@ -135,9 +136,15 @@ async def main():
             await fill('input[autocomplete=username]',member_name)
             await fill('input[autocomplete=current-password]',test_password)
             await evaluate("document.querySelector('.auth-form').requestSubmit()")
-            await wait_for("document.querySelector('.team-apply-form') && !document.querySelector('[data-nav=projects]:disabled')")
+            await wait_for("document.querySelector('.team-apply-button') && !document.querySelector('[data-nav=projects]:disabled')")
             assert await evaluate("!document.querySelector('.team-create-form') && !document.querySelector('.team-library-button')")
-            await fill('.team-apply-form input',team_code)
+            await evaluate("document.querySelector('.team-apply-button').click()")
+            await wait_for("document.querySelector('dialog[open] .team-apply-form') !== null")
+            await fill('.team-apply-form input',suffix)
+            await wait_for("document.querySelectorAll('.team-apply-form select option').length===2 && !document.querySelector('.team-apply-form select').disabled")
+            await evaluate("(() => { const select=document.querySelector('.team-apply-form select');select.selectedIndex=1;select.dispatchEvent(new Event('change',{bubbles:true})); })()")
+            await wait_for("document.querySelector('.team-directory-description')?.textContent.includes('模拟教师')")
+            assert await evaluate("document.querySelector('.team-apply-form select').selectedOptions[0].textContent.includes('1 人')")
             await fill('.team-apply-form textarea','浏览器合成学生申请，非真实人员。')
             await evaluate("document.querySelector('.team-apply-form').requestSubmit()")
             await wait_for("document.querySelector('.own-applications')?.textContent.includes('待审批')")
@@ -152,7 +159,9 @@ async def main():
             await wait_for("Array.from(document.querySelectorAll('.team-review button')).some(e=>e.textContent==='批准加入')")
             await screenshot('team-approval-desktop.png')
             await evaluate("Array.from(document.querySelectorAll('.team-review button')).find(e=>e.textContent==='批准加入').click()")
-            await wait_for("document.querySelectorAll('.team-person').length===2")
+            await wait_for("document.querySelector('#team-confirm-dialog-title') !== null")
+            await evaluate("document.querySelector('dialog[open] .actions .primary').click()")
+            await wait_for("document.querySelectorAll('.team-person').length===2 && !document.querySelector('dialog[open]')")
             await screenshot('team-members-desktop.png')
             await evaluate("document.querySelector('.profile-button').focus();document.querySelector('.profile-button').click()")
             await wait_for("document.querySelector('dialog[open] .profile-form') !== null")
@@ -203,24 +212,71 @@ async def main():
             await rpc('Emulation.setDeviceMetricsOverride', {'width':1440,'height':1000,'deviceScaleFactor':1,'mobile':False})
             await evaluate("document.querySelector('.edit-project-form').requestSubmit()")
             await wait_for("document.querySelector('.project-card h2')?.textContent==="+json.dumps(renamed)+" && !document.querySelector('.edit-project-form')")
+            await evaluate("document.querySelector('.open-member-dialog').click()")
+            await wait_for("document.querySelector('dialog[open] .member-form') !== null")
             await fill('.member-form input',member_name)
             await evaluate("document.querySelector('.member-form').requestSubmit()")
             await wait_for("document.querySelectorAll('.members-table tbody tr').length===2 && !document.querySelector('header button.primary:disabled')")
             await screenshot('project-edit-admin.png')
+            await evaluate("document.querySelector('[data-nav=runtime]').click()")
+            await wait_for("document.querySelectorAll('.center-metrics button').length===2")
+            for index in range(2):
+                await evaluate(f"document.querySelectorAll('.center-metrics button')[{index}].click()")
+                await wait_for("document.querySelector('.task-center select')?.value==='failed'")
+                assert await evaluate("document.querySelectorAll('.task-center input[type=date]').length===2")
+                await evaluate("document.querySelector('[data-nav=runtime]').click()")
+                await wait_for("document.querySelectorAll('.center-metrics button').length===2")
+            await evaluate("document.querySelector('[data-nav=documents]').click()")
+            await wait_for("document.querySelector('.upload-button') !== null")
+            assert await evaluate("document.querySelector('.upload-area')===null")
+            await evaluate("document.querySelector('.upload-button').click()")
+            await wait_for("document.querySelector('dialog[open] .upload-area input[multiple]') !== null")
+            batch_paths=[]
+            for tag in ('a','b'):
+                file_path=output / f'ui-batch-{tag}-{suffix}.txt'
+                file_path.write_bytes(b'   ')
+                batch_paths.append(str(file_path))
+            tree=await rpc('DOM.getDocument')
+            node=await rpc('DOM.querySelector',{'nodeId':tree['root']['nodeId'],'selector':'.upload-area input[type=file]'})
+            await rpc('DOM.setFileInputFiles',{'nodeId':node['nodeId'],'files':batch_paths})
+            await evaluate("document.querySelector('.upload-area input[type=checkbox]').click();document.querySelector('.upload-area').requestSubmit()")
+            await wait_for("document.querySelectorAll('.documents-table tbody tr').length===2 && !document.querySelector('dialog[open]')")
+            assert await evaluate("document.querySelector('.documents-table tbody').textContent.includes('合成教师')")
+            await fill('.file-search input','batch-a')
+            await evaluate("document.querySelector('.file-search').requestSubmit()")
+            await wait_for("document.querySelectorAll('.documents-table tbody tr').length===1")
+            await evaluate("document.querySelector('.doc-actions .text-button').click()")
+            await wait_for("document.querySelector('dialog[open] .version-row button') !== null")
+            await evaluate("window.__realOpen=window.open;window.open=(...args)=>window.__sourceTab=window.__realOpen(...args)")
+            await evaluate("document.querySelector('.version-row button').click()", user_gesture=True)
+            await wait_for("!!window.__sourceTab?.document.querySelector('main pre') && !!window.__sourceTab.document.querySelector('a[download]')")
+            await evaluate("window.__sourceTab.close();window.open=window.__realOpen;delete window.__sourceTab;delete window.__realOpen;document.querySelector('dialog[open] .dialog-close').click()")
+            await wait_for("!document.querySelector('dialog[open]')")
+            for action, condition in [('撤下', "document.querySelector('.documents-table tbody')?.textContent.includes('已停止访问')"),
+                                      ('恢复访问', "document.querySelector('.documents-table tbody')?.textContent.includes('撤下') && !document.querySelector('.documents-table tbody')?.textContent.includes('已停止访问')"),
+                                      ('撤下', "document.querySelector('.documents-table tbody')?.textContent.includes('已停止访问')"),
+                                      ('删除', "document.querySelectorAll('.documents-table tbody tr').length===0")]:
+                await evaluate("Array.from(document.querySelectorAll('.doc-actions button')).find(b=>b.textContent==="+json.dumps(action)+").click()")
+                await wait_for("document.querySelector('#document-action-dialog-title') !== null")
+                await evaluate("document.querySelector('dialog[open] .actions .primary').click()")
+                await wait_for("!document.querySelector('dialog[open]') && ("+condition+")")
+            await evaluate("document.querySelector('[data-nav=projects]').click()")
+            await wait_for("document.querySelector('.project-card') !== null && !document.querySelector('[data-nav=projects]:disabled')")
+            print('PASS team directory, project modals, batch upload, filename search, source tab, restore/delete, task links and date controls')
             await evaluate("Array.from(document.querySelectorAll('button')).find(e=>e.textContent==='退出登录').click()")
             await wait_for("document.querySelector('.login-card input[type=password]') !== null")
             await fill('input[autocomplete=username]',member_name)
             await fill('input[autocomplete=current-password]',test_password)
             await evaluate("document.querySelector('.auth-form').requestSubmit()")
             await wait_for("document.querySelectorAll('.members-table tbody tr').length===2 && !document.querySelector('header button.primary:disabled')")
-            assert await evaluate("!document.querySelector('.member-form') && !document.querySelector('.edit-project-button') && !document.querySelector('.project-card-edit') && !document.querySelector('.members-table .danger-link')"), 'Member must only view contacts'
+            assert await evaluate("!document.querySelector('.open-member-dialog') && !document.querySelector('.edit-project-button') && !document.querySelector('.project-card-edit') && !document.querySelector('.members-table .danger-link')"), 'Member must only view contacts'
             assert await evaluate("Array.from(document.querySelectorAll('.members-table a')).some(e=>e.getAttribute('href')==="+json.dumps('mailto:'+updated_email)+")"), 'Shared QQ mailto contact missing'
             await wait_for("document.querySelectorAll('.team-person').length===2")
-            assert await evaluate("document.querySelector('.team-create-form')===null"), 'Students must not get a team creation form'
+            assert await evaluate("document.querySelector('.team-create-button')===null"), 'Students must not get a team creation form'
             assert await evaluate("document.querySelector('.delete-team-button')===null"), 'Only the team owner may see the deletion entry'
             await evaluate("document.querySelector('.team-library-button').click()")
             await wait_for("document.querySelector('#document-library') && !document.querySelector('[data-nav=projects]:disabled')")
-            assert await evaluate("document.querySelector('.project-selector').selectedOptions[0].textContent.includes('全团队公共') && !document.querySelector('.upload-area')"), 'Student public library must be read only'
+            assert await evaluate("document.querySelector('.project-selector').selectedOptions[0].textContent.includes('全团队公共') && !document.querySelector('.upload-button')"), 'Student public library must be read only'
             await screenshot('team-public-library.png')
             await evaluate("document.querySelector('[data-nav=projects]').click()")
             await wait_for("document.querySelector('.project-card') && !document.querySelector('[data-nav=projects]:disabled')")
@@ -292,9 +348,9 @@ async def main():
             names = await evaluate("Array.from(document.querySelectorAll('.project-card h2')).map(e=>e.textContent)")
             assert names == expected, 'UI project scope differs from server-authorized projects'
             if username == 'demo_member':
-                assert await evaluate("document.querySelector('.member-form') === null"), 'Member management exposed'
+                assert await evaluate("document.querySelector('.open-member-dialog') === null"), 'Member management exposed'
             await screenshot(username + '.png')
-            assert await evaluate("document.querySelectorAll('[data-nav]').length===7 && document.querySelector('.sidebar-emblem')?.naturalWidth>0"), 'Seven pages or university emblem missing'
+            assert await evaluate("document.querySelectorAll('[data-nav]').length===6 && document.querySelector('.sidebar-emblem')?.naturalWidth>0"), 'Six pages or university emblem missing'
 
             async def select_project(project_name):
                 target_project=next(p for p in expected_projects if p['name']==project_name)
@@ -348,44 +404,40 @@ async def main():
                 await select_project(report['project_name'])
                 await wait_for("!document.querySelector('[data-nav=documents]:disabled')")
                 await evaluate("document.querySelector('[data-nav=documents]').click()")
-                await wait_for("document.querySelector('.pdf-password') !== null && document.querySelectorAll('.documents-table tbody tr').length===2")
+                await wait_for("document.querySelector('.upload-button') !== null && document.querySelectorAll('.documents-table tbody tr').length===2")
+                await evaluate("document.querySelector('.upload-button').click()")
+                await wait_for("document.querySelector('.upload-area input[type=file]') !== null")
                 upload_file=ROOT/'.local/centers-check/synthetic-encrypted.pdf'
                 tree=await rpc('DOM.getDocument')
                 node=await rpc('DOM.querySelector',{'nodeId':tree['root']['nodeId'],'selector':'.upload-area input[type=file]'})
                 await rpc('DOM.setFileInputFiles',{'nodeId':node['nodeId'],'files':[str(upload_file)]})
+                await wait_for("document.querySelector('.pdf-password') !== null")
                 await evaluate("(() => {const p=document.querySelector('.pdf-password');p.value='deliberately-wrong';p.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('.upload-area input[type=checkbox]').click();document.querySelector('.upload-area').requestSubmit()})()")
-                await wait_for("document.querySelector('.document-library .error')?.textContent.includes('密码错误')",attempts=150)
+                await wait_for("document.querySelector('.upload-area .error')?.textContent.includes('密码错误')",attempts=150)
                 assert await evaluate("document.querySelector('.pdf-password').value===''")
                 await asyncio.sleep(3.4)
-                assert await evaluate("document.querySelector('.document-library .error')?.textContent.includes('密码错误')"), 'Polling must not erase upload feedback'
+                assert await evaluate("document.querySelector('.upload-area .error')?.textContent.includes('密码错误')"), 'Polling must not erase upload feedback'
                 await screenshot('pdf-upload-desktop.png')
-                for name,selector in [('tasks','.task-center'),('evaluation','.evaluation-center'),('runtime','.runtime-center'),('search','#evidence-search'),('questions','.question-panel')]:
+                await evaluate("document.querySelector('.upload-area .ghost').click()")
+                for name,selector in [('tasks','.task-center'),('runtime','.runtime-center'),('search','#evidence-search'),('questions','.question-panel')]:
                     await evaluate("document.querySelector('[data-nav="+name+"]').click()")
                     await wait_for("document.querySelector("+json.dumps(selector)+") !== null")
                     await wait_for("!document.querySelector('[data-nav="+name+"]:disabled')")
                     assert await evaluate("document.querySelector('main').dataset.page==="+json.dumps(name)+" && document.querySelector('.project-selector').value==="+json.dumps(report['project_id']))
                     if name=='tasks':
                         await wait_for("document.querySelectorAll('.task-center tbody tr').length===2")
-                    if name=='evaluation':
-                        await wait_for("document.querySelectorAll('.eval-case').length>0")
-                        assert await evaluate("document.querySelector('.eval-case').textContent.includes('待人工确认') && document.querySelector('.eval-case button').disabled")
-                        previous_cases=await evaluate("document.querySelectorAll('.eval-case').length")
-                        await evaluate("(() => {const select=document.querySelector('.case-form select');const docs=document.querySelectorAll('.case-form select')[1];docs.value=docs.options[1].value;docs.dispatchEvent(new Event('change',{bubbles:true}))})()")
-                        await wait_for("document.querySelector('.gold-picker input') !== null")
-                        await evaluate("(() => {const q=document.querySelector('.case-form input');q.value='浏览器自动合成标注草稿';q.dispatchEvent(new Event('input',{bubbles:true}));const notes=document.querySelector('.case-form textarea');notes.value='AI自动合成测试，未人工确认，不用于正式评测。';notes.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('.gold-picker input').click();document.querySelector('.case-form').requestSubmit()})()")
-                        await wait_for("document.querySelectorAll('.eval-case').length==="+str(previous_cases+1))
                     if name=='runtime':
                         await wait_for("document.querySelectorAll('.audit-table tbody tr').length>=4")
-                    if name in {'tasks','evaluation','runtime'}:
+                    if name in {'tasks','runtime'}:
                         await evaluate('window.scrollTo(0,0)')
                         await screenshot('seven-'+name+'-desktop.png')
                         await rpc('Emulation.setDeviceMetricsOverride', {'width':390,'height':844,'deviceScaleFactor':1,'mobile':True})
-                        assert await evaluate('document.documentElement.scrollWidth <= 390'), 'Seven-page mobile overflow: '+name
+                        assert await evaluate('document.documentElement.scrollWidth <= 390'), 'Mobile overflow: '+name
                         await screenshot('seven-'+name+'-mobile.png')
                         await rpc('Emulation.setDeviceMetricsOverride', {'width':1440,'height':1000,'deviceScaleFactor':1,'mobile':False})
                 await evaluate("document.querySelector('[data-nav=projects]').click()")
                 await wait_for("document.querySelector('.project-card') !== null && !document.querySelector('[data-nav=projects]:disabled')")
-                print('PASS seven isolated pages, university emblem, password failure clearing, task/audit data, eval draft guard and mobile widths')
+                print('PASS six isolated pages, university emblem, password failure clearing, task/audit data and mobile widths')
             if username == 'demo_admin' and '--runtime' in sys.argv:
                 await evaluate("document.querySelector('[data-nav=documents]').click()")
                 await wait_for("document.querySelector('[data-worker-status=recent_heartbeat]') !== null")
@@ -403,15 +455,16 @@ async def main():
                 await wait_for("document.querySelector('main[data-page=documents]') && !document.querySelector('.project-grid') && !document.querySelector('#evidence-search')")
                 upload_file = output / 'browser-upload.md'
                 upload_file.write_text('# 浏览器合成验收\n\n这是自动生成的公开演示文字，用于验证上传、处理状态和原文预览。',encoding='utf-8')
+                await wait_for("document.querySelector('.upload-button') !== null")
+                previous_version = await evaluate("(() => {const row=Array.from(document.querySelectorAll('.documents-table tbody tr')).find(e=>e.querySelector('strong')?.textContent==='browser-upload.md');if(row){const n=Number(row.querySelector('.badge').textContent.match(/v(\\d+)/)?.[1] || 0);Array.from(row.querySelectorAll('button')).find(e=>e.textContent==='更新').click();return n}document.querySelector('.upload-button').click();return 0})()")
                 await wait_for("document.querySelector('.upload-area input[type=file]') !== null")
-                previous_version = await evaluate("(() => {const row=Array.from(document.querySelectorAll('.documents-table tbody tr')).find(e=>e.querySelector('strong')?.textContent==='browser-upload.md');if(row){const n=Number(row.querySelector('.badge').textContent.match(/v(\\d+)/)?.[1] || 0);Array.from(row.querySelectorAll('button')).find(e=>e.textContent==='更新').click();return n}return 0})()")
                 tree = await rpc('DOM.getDocument')
                 node = await rpc('DOM.querySelector',{'nodeId':tree['root']['nodeId'],'selector':'.upload-area input[type=file]'})
                 await rpc('DOM.setFileInputFiles',{'nodeId':node['nodeId'],'files':[str(upload_file)]})
                 await evaluate("document.querySelector('.upload-area input[type=checkbox]').click()")
                 await evaluate("document.querySelector('.upload-area').requestSubmit()")
                 for attempt in range(120):
-                    state = await evaluate("(() => {const row=Array.from(document.querySelectorAll('.documents-table tbody tr')).find(e=>e.querySelector('strong')?.textContent==='browser-upload.md');return !!row && row.querySelector('.badge').textContent.includes('v"+str(previous_version+1)+" · 已就绪') && document.querySelector('.upload-area input[type=file]').files.length===0})()")
+                    state = await evaluate("(() => {const row=Array.from(document.querySelectorAll('.documents-table tbody tr')).find(e=>e.querySelector('strong')?.textContent==='browser-upload.md');return !!row && row.querySelector('.badge').textContent.includes('v"+str(previous_version+1)+" · 已就绪') && !document.querySelector('.upload-area')})()")
                     if state:
                         break
                     await asyncio.sleep(.5)
@@ -419,8 +472,10 @@ async def main():
                     raise RuntimeError('Browser upload did not become ready')
                 await evaluate("(() => {const row=Array.from(document.querySelectorAll('.documents-table tbody tr')).find(e=>e.querySelector('strong')?.textContent==='browser-upload.md');Array.from(row.querySelectorAll('button')).find(e=>e.textContent==='版本与原文').click()})()")
                 await wait_for("document.querySelector('.version-panel .version-row') !== null")
-                await evaluate("document.querySelector('.version-panel .version-row button').click()")
-                await wait_for("document.querySelector('.markdown-source')?.textContent.includes('浏览器合成验收') && document.querySelectorAll('.chunk-card').length > 0")
+                await evaluate("window.__realOpen=window.open;window.open=(...args)=>window.__sourceTab=window.__realOpen(...args)")
+                await evaluate("document.querySelector('.version-panel .version-row button').click()", user_gesture=True)
+                await wait_for("!!window.__sourceTab?.document.querySelector('main pre')")
+                await evaluate("window.__sourceTab.close();window.open=window.__realOpen;delete window.__sourceTab;delete window.__realOpen")
                 await screenshot('documents-admin.png')
                 await rpc('Emulation.setDeviceMetricsOverride', {'width': 390, 'height': 844, 'deviceScaleFactor': 1, 'mobile': True})
                 await screenshot('documents-mobile.png')
@@ -444,14 +499,16 @@ async def main():
                 await wait_for("document.querySelector('.search-consent input') !== null")
                 await evaluate("document.querySelector('.search-consent input').click();document.querySelector('.search-form').requestSubmit()")
                 await wait_for("document.querySelectorAll('.evidence-card').length>0 && document.querySelector('.search-details')?.textContent.includes('重排序状态：applied')")
-                await evaluate("document.querySelector('.evidence-card .source-button').click()")
-                await wait_for("document.querySelectorAll('.source-preview .focused-line').length>0")
+                await evaluate("window.__realOpen=window.open;window.open=(...args)=>window.__sourceTab=window.__realOpen(...args)")
+                await evaluate("document.querySelector('.evidence-card .source-button').click()", user_gesture=True)
+                await wait_for("!!window.__sourceTab?.document.querySelector('main pre')")
+                await evaluate("window.__sourceTab.close();window.open=window.__realOpen;delete window.__sourceTab;delete window.__realOpen")
                 await screenshot('search-hybrid.png')
                 await rpc('Emulation.setDeviceMetricsOverride', {'width':390,'height':844,'deviceScaleFactor':1,'mobile':True})
                 assert await evaluate('window.innerWidth === 390 && document.documentElement.scrollWidth <= 390'), 'Mobile search page overflows'
                 await screenshot('search-mobile.png')
                 await rpc('Emulation.setDeviceMetricsOverride', {'width':1440,'height':1000,'deviceScaleFactor':1,'mobile':False})
-                print('PASS browser local keyword, real hybrid rerank, source line highlighting and mobile search width')
+                print('PASS browser local keyword, real hybrid rerank, source tab and mobile search width')
             if username == 'demo_admin' and '--questions' in sys.argv:
                 report = json.loads((ROOT / '.local/qa-live-check.json').read_text(encoding='utf-8'))
                 await evaluate("document.querySelector('[data-nav=projects]').click()")
@@ -467,8 +524,10 @@ async def main():
                 await wait_for("document.querySelector('.question-form') !== null && !document.querySelector('.ask-submit')?.textContent.includes('正在')")
                 await evaluate("(() => {const field=document.querySelector('.question-input');field.value='项目管理员能做哪些成员管理操作？';field.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('.qa-consent input').click();document.querySelector('.question-form').requestSubmit()})()")
                 await wait_for("document.querySelector('.answer-block[data-status=answered]') !== null", attempts=450)
-                await evaluate("document.querySelector('.answer-claims .citation-button').click()")
-                await wait_for("document.querySelectorAll('.source-preview .focused-line').length>0")
+                await evaluate("window.__realOpen=window.open;window.open=(...args)=>window.__sourceTab=window.__realOpen(...args)")
+                await evaluate("document.querySelector('.answer-claims .citation-button').click()", user_gesture=True)
+                await wait_for("!!window.__sourceTab?.document.querySelector('main pre')")
+                await evaluate("window.__sourceTab.close();window.open=window.__realOpen;delete window.__sourceTab;delete window.__realOpen")
                 await screenshot('questions-desktop.png')
                 await rpc('Emulation.setDeviceMetricsOverride', {'width':390,'height':844,'deviceScaleFactor':1,'mobile':True})
                 assert await evaluate('window.innerWidth === 390 && document.documentElement.scrollWidth <= 390'), 'Mobile questions page overflows'

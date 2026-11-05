@@ -1,190 +1,287 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import FormDialog from './FormDialog.vue'
+import { openSource } from './files'
 
-const props = defineProps({ project: { type: Object, required: true }, api: { type: Function, required: true } })
+const props = defineProps({ project:Object, api:Function })
 const documents = ref([])
 const error = ref('')
-const errorTrace = ref('')
-const runtime = ref(null)
+const formError = ref('')
 const limits = ref(null)
-const pdfPassword = ref('')
-const uploadNotice = ref('')
+const runtime = ref(null)
+const localTime = value => new Date(value).toLocaleString('zh-CN', {hour12:false})
+const notice = ref('')
 const busy = ref(false)
-const file = ref(null)
-const fileInput = ref(null)
-const consent = ref(false)
+const dialog = ref('')
 const target = ref(null)
+const files = ref([])
+const passwords = ref([])
+const consent = ref(false)
 const history = ref([])
-const selectedDocument = ref(null)
-const sourceUrl = ref('')
-const sourceText = ref('')
-const sourceName = ref('')
-const sourcePdf = ref(false)
-const chunks = ref([])
-const previewTitle = ref('')
-let timer
-let alive = true
-let polling = false
-let pollFailure = false
+const term = ref('')
+const filter = ref('')
+const offset = ref(0)
 const admin = computed(() => props.project.role === 'admin')
-const statuses = { queued: '等待处理', processing: '处理中', ready: '已就绪', failed: '处理失败', cancelled: '已取消', succeeded: '已完成' }
-const stages = { queued: '等待 Worker', parsing: '解析与分块', embedding: '生成向量', publishing: '发布索引', done: '入库完成', failed: '失败', cancelled: '取消' }
-function localTime(value) { return new Date(value).toLocaleString('zh-CN', {hour12:false}) }
-const reasons = { INVALID_UTF8: 'Markdown 需使用 UTF-8 编码', NO_TEXT: '未提取到文字，扫描件需另做 OCR', INVALID_PDF: 'PDF 无法解析', ENCRYPTED_PDF: '请重新上传并提供有权使用的PDF密码', TEXT_TOO_LARGE: '提取文本超过当前字符上限', TOO_MANY_PAGES: 'PDF 超过当前页数上限', PDF_PAGE_TOO_LARGE: 'PDF 单页内容流过大', EMBEDDING_UNAVAILABLE: '向量服务暂不可用', EMBEDDING_HTTP_ERROR: '向量服务返回错误', EMBEDDING_INVALID_RESPONSE: '向量返回格式或维度不匹配', MODEL_NOT_CONFIGURED: '向量服务未配置', LEASE_EXHAUSTED: 'Worker 多次超时，可手动重试', FILE_NOT_FOUND: '原文件不存在', FILE_CHANGED: '原文件校验失败', PROCESSING_TIMEOUT: '处理超时，请拆分资料后重试', TOO_MANY_CHUNKS: '片段数量超过当前上限', PARSE_FAILED: '解析失败，请检查文件或拆分后重试' }
-
-function clearSource() {
-  if (sourceUrl.value) URL.revokeObjectURL(sourceUrl.value)
-  sourceUrl.value = ''; sourceText.value = ''; sourceName.value = ''; chunks.value = []; previewTitle.value = ''
+const statuses = { queued:'等待处理', processing:'处理中', ready:'已就绪', failed:'处理失败', cancelled:'已取消' }
+const actionLabels = { withdraw:'撤下资料', restore:'恢复访问', delete:'删除资料', retry:'重试处理' }
+const reasons = {
+  INVALID_UTF8:'文本需使用 UTF-8 编码', INVALID_OFFICE:'Office 文件损坏、加密或超出解包限制',
+  NO_TEXT:'未提取到可索引文字', INVALID_PDF:'PDF 无法解析', TEXT_TOO_LARGE:'提取文本超过上限',
+  TOO_MANY_CHUNKS:'片段数量超过上限', PROCESSING_TIMEOUT:'处理超时',
 }
-
-function clearDetails() {
-  clearSource(); history.value = []; selectedDocument.value = null
-}
+let alive = true
+let requestNumber = 0
+let timer
 
 async function load() {
-  const result = await props.api(`/projects/${props.project.id}/documents`)
-  if (!alive) return
-  documents.value = result
-  const status = await props.api(`/projects/${props.project.id}/ingestion-status`)
-  if (!alive) return
-  runtime.value = status
-  const config = await props.api('/file-limits')
-  if (alive) limits.value = config
-  if (selectedDocument.value && !result.some(d => d.id === selectedDocument.value.id && d.is_active)) clearDetails()
-  if (selectedDocument.value) {
-    const id = selectedDocument.value.id
-    const versions = await props.api(`/documents/${id}/versions`)
-    if (alive && selectedDocument.value?.id === id) history.value = versions
+  const request = ++requestNumber
+  const params = new URLSearchParams({ q:filter.value, offset:offset.value })
+  try {
+    const [result, health] = await Promise.all([
+      props.api(`/projects/${props.project.id}/documents?${params}`),
+      props.api(`/projects/${props.project.id}/ingestion-status`),
+    ])
+    if (alive && request === requestNumber) {
+      documents.value = result
+      runtime.value = health
+      error.value = ''
+    }
+  } catch (e) {
+    if (alive && request === requestNumber) {
+      documents.value = []
+      runtime.value = null
+      error.value = e.message
+    }
   }
 }
 
-async function run(action) {
-  if (busy.value) return
-  busy.value = true; error.value = ''; errorTrace.value = ''
-  try { await action() } catch (e) { if (alive) { error.value = e.message; errorTrace.value = e.traceId || '' } }
-  finally { if (alive) busy.value = false }
+function search() {
+  offset.value = 0
+  filter.value = term.value.trim()
+  error.value = ''
+  return load()
 }
 
-function upload() {
-  return run(async () => {
-    uploadNotice.value = ''
-    if (!file.value || !consent.value) throw new Error('请选择文件并确认资料授权与向量服务处理')
-    const form = new FormData()
-    form.append('file', file.value)
-    form.append('allow_external_processing', 'true')
-    if (pdfPassword.value) form.append('pdf_password',pdfPassword.value)
-    if (!target.value) form.append('project_id', props.project.id)
-    const path = target.value ? `/documents/${target.value.id}/versions` : '/documents'
-    let response
-    try { response = await props.api(path, { method: 'POST', body: form }) }
-    finally { pdfPassword.value = '' }
-    uploadNotice.value = response.decrypted ? 'PDF已解密并提交入库。项目内保存的是解密副本，文件密码未保存。' : '已提交入库，请在任务中心查看处理进度。'
-    file.value = null; consent.value = false; target.value = null
-    if (fileInput.value) fileInput.value.value = ''
-    clearDetails()
+function changePage(step) {
+  offset.value += step
+  return load()
+}
+
+function openDialog(kind, doc = null) {
+  target.value = doc
+  files.value = []
+  passwords.value = []
+  consent.value = false
+  formError.value = ''
+  notice.value = ''
+  history.value = []
+  dialog.value = kind
+  if (kind === 'history') loadHistory(doc)
+}
+
+function close() {
+  dialog.value = ''
+  target.value = null
+  passwords.value = []
+  files.value = []
+}
+
+async function loadHistory(doc) {
+  try {
+    const versions = await props.api(`/documents/${doc.id}/versions`)
+    if (alive && dialog.value === 'history' && target.value?.id === doc.id) history.value = versions
+  } catch (e) {
+    if (alive && dialog.value === 'history' && target.value?.id === doc.id) formError.value = e.message
+  }
+}
+
+function selectFiles(event) {
+  files.value = Array.from(event.target.files || [])
+  passwords.value = []
+  formError.value = files.value.length > 20 ? '一次最多选择 20 份文件。' : ''
+}
+
+async function upload() {
+  if (busy.value || !consent.value || !files.value.length || files.value.length > 20) return
+  busy.value = true
+  formError.value = ''
+  const batch = files.value
+  const doc = target.value
+  const failed = []
+  const messages = []
+  let succeeded = 0
+  try {
+    for (const [index, file] of batch.entries()) {
+      if (!alive) break
+      const form = new FormData()
+      form.append('file', file)
+      form.append('allow_external_processing', 'true')
+      if (!doc) form.append('project_id', props.project.id)
+      if (passwords.value[index]) form.append('pdf_password', passwords.value[index])
+      try {
+        await props.api(doc ? `/documents/${doc.id}/versions` : '/documents', { method:'POST', body:form })
+        succeeded++
+      } catch (e) {
+        failed.push(file)
+        messages.push(`${file.name}：${e.message}`)
+      }
+    }
+    if (!alive) return
+    passwords.value = []
+    notice.value = succeeded ? `已提交 ${succeeded} 份文件，等待后台处理。` : ''
+    if (failed.length) {
+      files.value = failed
+      formError.value = messages.join('\n')
+    } else close()
     await load()
-  })
-}
-
-function chooseVersion(document) {
-  target.value = document; consent.value = false; pdfPassword.value = ''
-  fileInput.value?.focus()
-}
-
-async function loadHistory(document) {
-  const result = await props.api(`/documents/${document.id}/versions`)
-  if (!alive) return
-  clearSource(); selectedDocument.value = document; history.value = result
-}
-
-async function viewSource(version) {
-  const current = selectedDocument.value
-  const blob = await props.api(`/documents/${current.id}/source?version_id=${version.id}`, {}, 'blob')
-  if (!alive || selectedDocument.value?.id !== current.id) return
-  clearSource()
-  sourceName.value = version.filename
-  sourcePdf.value = version.filename.toLowerCase().endsWith('.pdf')
-  sourceUrl.value = URL.createObjectURL(blob)
-  previewTitle.value = `${current.title} · v${version.number}`
-  if (!sourcePdf.value) sourceText.value = await blob.text()
-  if (version.status === 'ready') {
-    const result = await props.api(`/documents/${current.id}/chunks?version_id=${version.id}&limit=30`)
-    if (alive && selectedDocument.value?.id === current.id) chunks.value = result.items
+  } finally {
+    passwords.value = []
+    busy.value = false
   }
 }
 
-function withdraw(document) {
-  if (!window.confirm(`撤下“${document.title}”？该资料将停止访问，未完成任务会取消。`)) return
-  return run(async () => {
-    await props.api(`/documents/${document.id}/withdraw`, { method: 'POST' })
-    if (target.value?.id === document.id) target.value = null
-    clearDetails(); await load()
-  })
+async function confirm() {
+  if (busy.value) return
+  busy.value = true
+  formError.value = ''
+  const kind = dialog.value
+  const doc = target.value
+  const path = kind === 'retry' ? `/tasks/${doc.latest_version.task.id}/retry` :
+    `/documents/${doc.id}${kind === 'delete' ? '' : '/' + kind}`
+  try {
+    await props.api(path, { method:kind === 'delete' ? 'DELETE' : 'POST' })
+    close()
+    await load()
+    if (offset.value && !documents.value.length) await changePage(-100)
+  } catch (e) {
+    formError.value = e.message
+  } finally {
+    busy.value = false
+  }
 }
 
-function retry(task) {
-  return run(async () => { await props.api(`/tasks/${task.id}/retry`, { method: 'POST' }); clearDetails(); await load() })
+function preview(version) {
+  try {
+    openSource(props.api, { ...version, document_id:target.value.id, version_id:version.id })
+  } catch (e) { formError.value = e.message }
 }
 
 onMounted(async () => {
-  await run(load)
+  await load()
   if (!alive) return
-  timer = setInterval(async () => {
-    if (!alive || polling || busy.value || document.hidden) return
-    polling = true
-    try { await load(); if (alive && pollFailure) { error.value = ''; errorTrace.value = ''; pollFailure = false } } catch (e) { if (alive) { pollFailure = true; documents.value = []; runtime.value = null; clearDetails(); error.value = e.message; errorTrace.value = e.traceId || '' } }
-    finally { polling = false }
-  }, 3000)
+  try { limits.value = await props.api('/file-limits') } catch (e) { error.value = e.message }
+  if (alive) timer = setInterval(() => { if (!busy.value && !document.hidden) load() }, 3000)
 })
-onUnmounted(() => { alive = false; clearInterval(timer); clearSource(); pdfPassword.value = '' })
+onUnmounted(() => { alive = false; clearInterval(timer); passwords.value = [] })
 </script>
 
 <template>
   <section id="document-library" class="panel document-library">
-    <div class="section-heading"><div><p class="eyebrow">DOCUMENTS & VERSIONS</p><h2>{{ project.is_team_library?'团队公共资料库':'项目资料库' }}</h2></div><button class="ghost" :disabled="busy" @click="run(load)">刷新资料</button></div>
-    <p class="muted">上传、处理与版本记录在这里汇总。新版本完成后生效，构建期间继续使用原有可用版本。</p>
-    <div v-if="error" class="error" role="alert">{{ error }}<small v-if="errorTrace">追踪编号：{{ errorTrace }}</small></div>
-    <p v-if="uploadNotice" class="hint" role="status">{{ uploadNotice }}</p>
+    <div class="section-heading">
+      <div><p class="eyebrow">DOCUMENTS &amp; VERSIONS</p><h2>{{ project.is_team_library ? '团队公共资料库' : '项目资料库' }}</h2></div>
+      <button v-if="admin" class="primary upload-button" @click="openDialog('upload')">上传新资料</button>
+    </div>
     <div v-if="runtime" :class="['worker-status', { warning:runtime.worker_status!=='recent_heartbeat' }]" :data-worker-status="runtime.worker_status" role="status"><strong>{{ runtime.worker_status==='recent_heartbeat' ? '入库服务最近有心跳' : '暂未检测到入库服务的近期心跳' }}</strong><p>{{ runtime.worker_status==='recent_heartbeat' ? '这表示最近有 Worker 活动，不保证单个任务已完成。' : `最近${runtime.freshness_seconds}秒没有可用心跳；请检查 Worker 是否已启动、数据库是否可连接。长时间解析也可能延迟心跳。` }}</p><span>本项目任务：等待 {{ runtime.tasks.queued }} · 处理中 {{ runtime.tasks.processing }} · 失败 {{ runtime.tasks.failed }}</span><small v-if="runtime.oldest_pending_at">最早待完成任务：{{ localTime(runtime.oldest_pending_at) }}</small></div>
-    <form v-if="admin" class="upload-area" @submit.prevent="upload">
-      <div class="upload-heading"><strong>{{ target ? `更新：${target.title}` : '上传新资料' }}</strong><button v-if="target" type="button" class="text-button" @click="target = null">取消更新</button></div>
-      <label>文件<input ref="fileInput" type="file" accept=".pdf,.md" :disabled="busy" @change="file = $event.target.files?.[0] || null"></label>
-      <p class="hint">支持文本型PDF、UTF-8 Markdown。当前文件上限 {{ limits ? limits.max_upload_bytes/1048576 : '…' }} MB，PDF最多 {{ limits?.max_pdf_pages??'…' }} 页；文字和处理时长也有上限，详见运行与审计。扫描件仍需OCR。</p>
-      <label>PDF密码（仅加密文件需要）<input v-model="pdfPassword" class="pdf-password" type="password" autocomplete="off" maxlength="256" :disabled="busy" placeholder="输入你有权使用的文件密码"></label>
-      <p class="hint">加密PDF将在本机解密，项目内保存可访问的解密副本。密码只用于本次处理，不写日志或数据库；无论成功或失败都会清空输入框。</p>
-      <label class="consent"><input v-model="consent" type="checkbox" required>我有权上传此资料，允许将提取文本发送至已配置的向量服务。</label>
-      <button class="primary" :disabled="busy || !file || !consent">{{ busy ? '正在提交…' : target ? '提交新版本' : '上传并入库' }}</button>
+    <form class="file-search" @submit.prevent="search">
+      <label>按文件名搜索<input v-model="term" type="search" maxlength="200" placeholder="输入文件名的一部分" @search="search"></label>
+      <button class="ghost">搜索</button>
     </form>
-    <p v-else class="hint">{{ project.is_team_library?'团队公共资料对已批准成员开放，上传和版本维护由团队管理员负责。':'当前为普通成员，可查看本项目资料。上传和版本维护由项目管理员负责。' }}</p>
-    <div v-if="!documents.length" class="docs-empty">暂无可查看资料。{{ admin ? '上传一份公开或获授权资料开始。' : '请联系项目管理员添加资料。' }}</div>
-    <div v-else class="table-wrap"><table class="documents-table"><thead><tr><th>资料</th><th>最新版本与处理</th><th>当前可用</th><th>操作</th></tr></thead><tbody>
-      <tr v-for="doc in documents" :key="doc.id">
-        <td><strong>{{ doc.title }}</strong><small class="file-meta">{{ doc.latest_version?.filename }} · {{ ((doc.latest_version?.file_size || 0)/1024).toFixed(1) }} KB</small></td>
-        <td><span :class="['badge', { admin: doc.latest_version?.status === 'ready' }]">{{ !doc.is_active ? '已撤下' : `v${doc.latest_version?.number} · ${statuses[doc.latest_version?.status] || '未知'}` }}</span>
-          <small v-if="doc.is_active" class="file-meta">{{ stages[doc.latest_version?.task?.stage] || '' }} · 已尝试 {{ doc.latest_version?.task?.attempts || 0 }} 次</small>
-          <small v-if="doc.is_active && doc.latest_version?.task?.error_code" class="task-error">{{ reasons[doc.latest_version.task.error_code] || '处理异常，请联系管理员检查任务' }}</small>
-          <small v-if="doc.is_active && doc.latest_version?.task?.retry_at" class="file-meta">自动重试不早于 {{ localTime(doc.latest_version.task.retry_at) }}；最多 {{ doc.latest_version.task.max_attempts }} 次</small>
-          <small v-if="doc.is_active && doc.latest_version?.task?.lease_until" class="file-meta">如处理进程中断，租约到期后可重新领取：{{ localTime(doc.latest_version.task.lease_until) }}</small>
+    <p v-if="error" class="error" role="alert">{{ error }}</p>
+    <p v-if="notice" class="hint" role="status">{{ notice }}</p>
+    <div v-if="!documents.length" class="docs-empty">{{ filter ? '没有匹配的文件。' : '当前没有可展示的资料。' }}</div>
+    <div v-else class="table-wrap"><table class="documents-table">
+      <thead><tr><th>资料</th><th>最近上传者</th><th>最新版本</th><th>当前可用</th><th>操作</th></tr></thead>
+      <tbody><tr v-for="doc in documents" :key="doc.id">
+        <td><strong>{{ doc.title }}</strong><small class="file-meta">{{ doc.latest_version?.filename }}</small></td>
+        <td>{{ doc.latest_version?.uploader || '未知' }}</td>
+        <td><span class="badge">{{ !doc.is_active ? '已撤下' : `v${doc.latest_version?.number} · ${statuses[doc.latest_version?.status] || '未知'}` }}</span>
+          <small v-if="doc.is_active && doc.latest_version?.task?.retry_at" class="file-meta">重试不早于 {{ localTime(doc.latest_version.task.retry_at) }}</small>
+          <small v-if="doc.is_active && doc.latest_version?.task?.lease_until" class="file-meta">处理中断后可于 {{ localTime(doc.latest_version.task.lease_until) }} 重新领取</small>
+          <small v-if="doc.is_active && doc.latest_version?.task?.error_code" class="task-error">{{ reasons[doc.latest_version.task.error_code] || doc.latest_version.task.error_code }}</small>
         </td>
-        <td>{{ !doc.is_active ? '已停止访问' : doc.current_version_id ? `v${doc.current_version_number} 正在使用` : '尚无可用版本' }}<small v-if="doc.latest_version?.status === 'ready'" class="file-meta">{{ doc.latest_version.chunk_count }} 个片段</small></td>
-        <td><div v-if="doc.is_active" class="doc-actions"><button class="text-button" :disabled="busy" @click="run(() => loadHistory(doc))">版本与原文</button><template v-if="admin"><button class="text-button" :disabled="busy" @click="chooseVersion(doc)">更新</button><button v-if="doc.latest_version?.task?.status === 'failed'" class="text-button" :disabled="busy" @click="retry(doc.latest_version.task)">重试</button><button class="danger-link" :disabled="busy" @click="withdraw(doc)">撤下</button></template></div><span v-else class="muted">已停止访问</span></td>
-      </tr>
-    </tbody></table></div>
-    <p class="hint">每3秒更新处理状态；列表最多显示最近100份资料。任务等待时请确认独立 Worker 已启动。</p>
-    <section v-if="selectedDocument" class="version-panel">
-      <div class="section-heading"><h3>{{ selectedDocument.title }} · 版本记录</h3><button class="ghost" @click="clearDetails">关闭</button></div>
-      <div v-for="version in history" :key="version.id" class="version-row"><div><strong>v{{ version.number }}</strong> <span class="badge">{{ statuses[version.status] }}</span><small class="file-meta">{{ version.filename }} · {{ version.chunk_count }} 个片段 {{ version.embedding_model ? `· ${version.embedding_model}` : '' }}</small></div><button class="ghost" :disabled="busy" @click="run(() => viewSource(version))">查看原文</button></div>
-    </section>
-    <section v-if="sourceUrl" class="source-panel"><div class="section-heading"><h3>{{ previewTitle }}</h3><a :href="sourceUrl" :download="sourceName">下载原文件</a></div>
-      <iframe v-if="sourcePdf" :src="sourceUrl" title="PDF原文" class="pdf-source" />
-      <pre v-else class="markdown-source">{{ sourceText }}</pre>
-      <h3 v-if="chunks.length">片段预览与原文位置</h3><p v-if="chunks.length" class="hint">显示前30个片段。Markdown位置为所在段落行范围，PDF为页码；长段落切分后的多个片段可能共享位置。</p>
-      <article v-for="chunk in chunks" :key="chunk.id" class="chunk-card"><small>{{ chunk.page ? `第 ${chunk.page} 页` : `第 ${chunk.line_start}—${chunk.line_end} 行` }} {{ chunk.section ? `· ${chunk.section}` : '' }} · 片段 {{ chunk.ordinal+1 }}</small><pre>{{ chunk.text }}</pre></article>
-    </section>
+        <td>{{ !doc.is_active ? '已停止访问' : doc.current_version_id ? `v${doc.current_version_number} 正在使用` : '尚无可用版本' }}</td>
+        <td><div class="doc-actions">
+          <template v-if="doc.is_active">
+            <button class="text-button" @click="openDialog('history', doc)">版本与原文</button>
+            <template v-if="admin">
+              <button class="text-button" @click="openDialog('upload', doc)">更新</button>
+              <button v-if="doc.latest_version?.task?.status === 'failed'" class="text-button" @click="openDialog('retry', doc)">重试</button>
+              <button class="danger-link" @click="openDialog('withdraw', doc)">撤下</button>
+            </template>
+          </template>
+          <template v-else-if="admin">
+            <button class="text-button" @click="openDialog('restore', doc)">恢复访问</button>
+            <button class="danger-link" @click="openDialog('delete', doc)">删除</button>
+          </template>
+        </div></td>
+      </tr></tbody>
+    </table></div>
+    <div v-if="offset || documents.length === 100" class="center-pagination">
+      <button class="ghost" :disabled="!offset" @click="changePage(-100)">上一页</button>
+      <button class="ghost" :disabled="documents.length < 100" @click="changePage(100)">下一页</button>
+    </div>
+
+    <FormDialog v-if="dialog === 'upload'" id="upload-dialog" :title="target ? '上传新版本' : '上传新资料'" :busy="busy" @close="close">
+      <form class="upload-area" @submit.prevent="upload">
+        <fieldset class="dialog-fields" :disabled="busy">
+          <p v-if="target" class="muted">{{ target.title }}</p>
+          <label>选择文件<input type="file" accept=".pdf,.md,.txt,.csv,.docx,.xlsx,.pptx" :multiple="!target" @change="selectFiles"></label>
+          <p class="hint">支持 PDF、Word、Excel、PowerPoint、Markdown、TXT 和 CSV。一次最多 20 份，每份上限 {{ limits ? limits.max_upload_bytes/1048576 : '…' }} MB。</p>
+          <div v-if="files.length <= 20" class="upload-files">
+            <div v-for="(file,index) in files" :key="index">
+              <strong>{{ file.name }}</strong>
+              <label v-if="file.name.toLowerCase().endsWith('.pdf')">PDF 密码（仅加密文件填写）<input v-model="passwords[index]" class="pdf-password" type="password" autocomplete="off" maxlength="256"></label>
+            </div>
+          </div>
+          <p v-if="files.some(file => file.name.toLowerCase().endsWith('.pdf'))" class="hint">加密 PDF 在本机解密后保存可访问副本，密码在提交后清空。</p>
+          <label class="consent"><input v-model="consent" type="checkbox" required>我有权上传这些资料，并允许将提取文本发送至已配置的向量服务。</label>
+          <p v-if="formError" class="error upload-errors" role="alert">{{ formError }}</p>
+          <p v-if="notice" class="hint">{{ notice }} 可重试剩余失败文件。</p>
+          <div class="actions"><button type="button" class="ghost" @click="close">取消</button><button class="primary" :disabled="!files.length || files.length > 20 || !consent">{{ busy ? '正在提交…' : '上传并入库' }}</button></div>
+        </fieldset>
+      </form>
+    </FormDialog>
+
+    <FormDialog v-else-if="dialog === 'history'" id="version-dialog" title="版本与原文" @close="close">
+      <p class="muted">{{ target.title }}</p>
+      <p v-if="formError" class="error" role="alert">{{ formError }}</p>
+      <div class="version-panel">
+        <div v-for="version in history" :key="version.id" class="version-row">
+          <div><strong>v{{ version.number }} · {{ statuses[version.status] }}</strong><small class="file-meta">{{ version.filename }} · {{ version.uploader || '未知上传者' }}</small></div>
+          <button class="ghost" @click="preview(version)">查看原文 ↗</button>
+        </div>
+      </div>
+    </FormDialog>
+
+    <FormDialog v-else-if="dialog" id="document-action-dialog" :title="actionLabels[dialog]" :busy="busy" @close="close">
+      <p v-if="dialog === 'withdraw'">撤下“{{ target.title }}”后，成员无法访问，未完成任务会停止。管理员可以恢复访问。</p>
+      <p v-else-if="dialog === 'restore'">恢复“{{ target.title }}”后，成员可再次访问已有版本。被撤下中断的最新版本会重新排队。</p>
+      <p v-else-if="dialog === 'delete'">删除“{{ target.title }}”后，资料会从列表移除，无法在系统内恢复。后台保留文件和审计记录。</p>
+      <p v-else>重新处理“{{ target.title }}”的最新版本。</p>
+      <p v-if="formError" class="error" role="alert">{{ formError }}</p>
+      <div class="actions"><button class="ghost" :disabled="busy" @click="close">取消</button><button class="primary" :disabled="busy" @click="confirm">{{ actionLabels[dialog] }}</button></div>
+    </FormDialog>
   </section>
 </template>
 
 <style scoped>
 .worker-status{border:1px solid #d9e7df;background:#f5faf7;border-radius:7px;padding:15px 18px;font-size:12px;color:#537565;margin:20px 0;overflow-wrap:anywhere}.worker-status.warning{border-color:#eadfc5;background:#fffbf1;color:#8b7448}.worker-status p{margin:7px 0;font-size:11px}.worker-status span,.worker-status small{display:block;font-size:11px;line-height:1.9}
-.document-library{scroll-margin-top:24px}.upload-area{background:#f8fafd;border:1px dashed #cbd5e2;border-radius:8px;padding:22px;margin:24px 0}.upload-heading{display:flex;justify-content:space-between;gap:16px;margin-bottom:15px}.upload-area input[type=file]{background:white}.consent{display:flex;gap:9px;align-items:flex-start;margin-top:20px;line-height:1.7;font-weight:400}.consent input{width:auto;margin-top:5px;flex-shrink:0}.docs-empty{padding:35px 16px;text-align:center;color:#8491a2}.file-meta{display:block;color:#8a96a5;font-size:11px;margin-top:8px;overflow-wrap:anywhere}.documents-table{white-space:normal}.documents-table th:first-child{width:28%}.documents-table td{vertical-align:top;min-width:140px;overflow-wrap:anywhere}.task-error{display:block;color:#a95e56;font-size:11px;margin-top:8px}.doc-actions{display:flex;gap:12px;flex-wrap:wrap}.text-button{border:0;background:transparent;padding:5px 0;color:#43658c;font-size:12px}.version-panel,.source-panel{border-top:1px solid #e4e9f0;padding-top:24px;margin-top:28px}.version-row{display:flex;justify-content:space-between;align-items:center;gap:20px;border-bottom:1px solid #edf0f4;padding:16px 0}.version-row strong{margin-right:10px}.pdf-source{width:100%;height:560px;border:1px solid #e1e5eb;border-radius:6px}.markdown-source,.chunk-card pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.8 "Microsoft YaHei",sans-serif}.markdown-source{background:#f8fafc;padding:20px;max-height:480px;overflow:auto;border-radius:6px}.chunk-card{padding:16px;background:#f8fafc;border:1px solid #edf0f4;border-radius:6px;margin-top:12px}.chunk-card small{color:#6b7e97}.chunk-card pre{margin-bottom:0}.source-panel a{color:#43658c;font-size:12px}@media(max-width:600px){.upload-area{padding:16px}.document-library{padding:20px}.version-row{align-items:flex-start}.documents-table{min-width:700px}}
+.file-search { display:flex; align-items:end; gap:12px; margin:20px 0 }
+.file-search label { flex:1; max-width:420px; margin:0 }
+.file-search button,.upload-button { flex-shrink:0 }
+.upload-files { display:grid; gap:10px; max-height:240px; overflow:auto; overflow-wrap:anywhere }
+.upload-files > div { padding:10px; background:#f5f7fa; border-radius:6px }
+.upload-files label { margin:8px 0 0 }
+.upload-errors { white-space:pre-wrap; overflow-wrap:anywhere }
+.consent { display:flex; gap:8px; margin-top:20px }
+.consent input { width:auto; margin:3px 0 0; flex-shrink:0 }
+.docs-empty { padding:35px 12px; text-align:center; color:#69798a }
+.file-meta { display:block; margin-top:6px; color:#69798a; overflow-wrap:anywhere }
+.documents-table { white-space:normal; min-width:660px }
+.documents-table td { vertical-align:top; overflow-wrap:anywhere }
+.task-error { display:block; color:#a04739; margin-top:6px }
+.doc-actions { display:flex; gap:10px; flex-wrap:wrap }
+.text-button { border:0; background:none; padding:5px 0; color:#43658c; font-size:12px }
+.version-row { display:flex; justify-content:space-between; align-items:center; gap:14px; padding:14px 0; border-top:1px solid #e5ebf2 }
+.version-row button { flex-shrink:0 }
 </style>

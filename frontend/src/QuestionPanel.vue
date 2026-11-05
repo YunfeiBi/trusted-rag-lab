@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import SourcePreview from './SourcePreview.vue'
+import { openSource } from './files'
 
 const props = defineProps({ project:{type:Object,required:true},api:{type:Function,required:true} })
 const question = ref('')
@@ -11,7 +11,6 @@ const error = ref('')
 const errorTrace = ref('')
 const record = ref(null)
 const history = ref([])
-const source = ref(null)
 let alive = true
 let polling = false
 let timer
@@ -39,7 +38,7 @@ async function run(action) {
 
 function ask() {
   return run(async () => {
-    record.value = null; source.value = null
+    record.value = null
     const data = await props.api('/questions',{method:'POST',body:JSON.stringify({project_id:props.project.id,question:question.value,retrieval_mode:mode.value,allow_external_processing:consent.value})})
     if (alive) record.value = data
     await loadHistory()
@@ -48,14 +47,15 @@ function ask() {
 
 function openRecord(item) {
   return run(async () => {
-    source.value = null
     const data = await props.api('/questions/'+item.id)
     if (alive) { record.value = data; question.value = data.question }
   })
 }
 
 function openCitation(id) {
-  source.value = record.value?.evidence.find(e=>e.evidence_id===id) || null
+  const item = record.value?.evidence.find(e=>e.evidence_id===id)
+  if (!item) return
+  try { openSource(props.api, item) } catch (e) { error.value = e.message }
 }
 
 function time(value) {
@@ -75,10 +75,9 @@ onMounted(async () => {
         const current = await props.api('/questions/'+previous.id)
         if (alive && record.value===previous) {
           record.value = current
-          if (!current.evidence.some(e=>e.chunk_id===source.value?.chunk_id)) source.value = null
         }
       }
-    } catch (e) { if (alive) { record.value = null; source.value = null; history.value = []; error.value = e.message } }
+    } catch (e) { if (alive) { record.value = null; history.value = []; error.value = e.message } }
     finally { polling = false }
   },7000)
 })
@@ -102,7 +101,6 @@ onUnmounted(() => { alive = false; clearInterval(timer) })
         <details class="qa-details"><summary>查看生成与检索记录</summary><p>模型：{{ record.details.chat_model }} · 提示版本：{{ record.details.prompt_version }}</p><p>检索：{{ record.details.retrieval?.effective_mode }} · 重排：{{ record.details.retrieval?.rerank_status }}</p><p>生成耗时：{{ record.details.generation_ms }} ms · 服务内总耗时：{{ record.details.total_ms }} ms</p><p>追踪编号：{{ record.trace_id }}</p></details>
       </section>
       <div v-else-if="!busy" class="qa-empty">回答将在这里展示，引用可直接打开对应原文。</div>
-      <SourcePreview v-if="source" :evidence="source" :api="api" @close="source = null" />
     </section>
     <aside class="panel question-history"><div class="section-heading"><h2>我的问答记录</h2><button class="ghost" :disabled="busy" @click="run(loadHistory)">刷新</button></div><p class="hint">仅展示你在当前项目的最近20条记录，其他成员不能查看。依据失效时隐藏历史回答。</p><p v-if="!history.length" class="muted history-empty">暂无记录</p><button v-for="item in history" :key="item.id" :class="['history-item',{selected:record?.id===item.id}]" :disabled="busy" @click="openRecord(item)"><strong>{{ item.question }}</strong><span>{{ statuses[item.status] }}</span><small>{{ time(item.created_at) }}</small></button></aside>
   </div>

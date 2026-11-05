@@ -16,7 +16,7 @@ from sqlalchemy import Float, cast, func, literal_column, select
 
 from .dependencies import CurrentUser, Db, bearer
 from .ingestion import IngestionError
-from .models import Chunk, Document, DocumentVersion, LoginSession, Membership, Project, StoredVector, Team, TeamMembership, User, utcnow
+from .models import SearchHistory, Chunk, Document, DocumentVersion, LoginSession, Membership, Project, StoredVector, Team, TeamMembership, User, utcnow
 from .security import token_digest
 
 router = APIRouter(prefix='/api')
@@ -226,10 +226,22 @@ def retrieve(db, data, user_id, embedding, reranker, session_hash=None):
 def search(data: SearchInput, user: CurrentUser, db: Db, request: Request,
            credentials: Annotated[HTTPAuthorizationCredentials,Depends(bearer)]):
     result = retrieve(db,data,user.id,request.app.state.embedding_client,request.app.state.rerank_client,token_digest(credentials.credentials))
+    check_access(db, data.project_id, user.id, token_digest(credentials.credentials))
+    db.add(SearchHistory(project_id=data.project_id, user_id=user.id, query=data.query))
+    db.commit()
     result['trace_id'] = request.state.trace_id
     logger.info('event=search trace_id=%s mode=%s effective=%s results=%s rerank=%s timings_ms=%s',
                 request.state.trace_id,data.mode,result['effective_mode'],len(result['results']),result['rerank_status'],result['timings_ms'])
     return result
+
+
+@router.get('/projects/{project_id}/search-history')
+def search_history(project_id: UUID, user: CurrentUser, db: Db):
+    check_access(db, project_id, user.id)
+    rows = db.scalars(select(SearchHistory).where(
+        SearchHistory.project_id == project_id, SearchHistory.user_id == user.id
+    ).order_by(SearchHistory.created_at.desc(), SearchHistory.id).limit(20))
+    return [{'id': str(row.id), 'query': row.query, 'created_at': row.created_at} for row in rows]
 
 
 @router.post('/search/validate')

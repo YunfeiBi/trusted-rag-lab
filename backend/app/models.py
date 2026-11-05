@@ -100,6 +100,7 @@ class Document(Base):
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'), index=True)
     title: Mapped[str] = mapped_column(String(200))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     latest_version: Mapped[int] = mapped_column(Integer, default=0)
     current_version_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey('document_versions.id', name='fk_current_document_version', use_alter=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -218,3 +219,12 @@ class EvaluationRun(Base):
     snapshot: Mapped[dict] = mapped_column(JSONB)
     results: Mapped[list] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),default=utcnow)
+
+
+class SearchHistory(Base):
+    __tablename__ = 'search_history'
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('app_users.id', ondelete='CASCADE'))
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id', ondelete='CASCADE'))
+    query: Mapped[str] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

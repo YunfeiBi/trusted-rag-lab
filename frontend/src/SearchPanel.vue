@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
-import SourcePreview from './SourcePreview.vue'
+import { downloadFile, openSource } from './files'
 
 const props = defineProps({ project: { type:Object, required:true }, api: { type:Function, required:true } })
 const query = ref('')
@@ -12,17 +12,18 @@ const busy = ref(false)
 const result = ref(null)
 const error = ref('')
 const errorTrace = ref('')
-const source = ref(null)
+const history = ref([])
+const historyError = ref('')
 let alive = true
 let validating = false
 let timer
 
 async function search() {
   if (busy.value) return
-  busy.value = true; error.value = ''; errorTrace.value = ''; result.value = null; source.value = null
+  busy.value = true; error.value = ''; errorTrace.value = ''; result.value = null
   try {
     const data = await props.api('/search',{ method:'POST',body:JSON.stringify({ project_id:props.project.id,query:query.value,mode:mode.value,top_k:topK.value,candidate_limit:20,use_rerank:rerank.value,allow_external_processing:consent.value }) })
-    if (alive) result.value = data
+    if (alive) { result.value = data; await loadHistory() }
   } catch (e) { if (alive) { error.value = e.message; errorTrace.value = e.traceId || '' } }
   finally { if (alive) busy.value = false }
 }
@@ -40,14 +41,30 @@ async function validate() {
       previous.results = filtered
       previous.status = 'degraded'
       if (!previous.warnings.some(w=>w.code==='SCOPE_CHANGED')) previous.warnings.push({code:'SCOPE_CHANGED',message:'部分资料或版本已变化，已清除失效结果，请重新搜索。'})
-      if (source.value && !allowed.has(source.value.chunk_id)) source.value = null
     }
   } catch (e) {
-    if (alive && result.value===previous) { result.value = null; source.value = null; error.value = e.message }
+    if (alive && result.value===previous) { result.value = null; error.value = e.message }
   } finally { validating = false }
 }
 
-onMounted(() => { timer = setInterval(validate,5000) })
+async function loadHistory() {
+  try {
+    const rows = await props.api(`/projects/${props.project.id}/search-history`)
+    if (alive) { history.value = rows; historyError.value = '' }
+  } catch (e) {
+    if (alive) { history.value = []; historyError.value = e.message }
+  }
+}
+
+function preview(item) {
+  try { openSource(props.api, item) } catch (e) { error.value = e.message }
+}
+
+async function download(item) {
+  try { await downloadFile(props.api, item) } catch (e) { error.value = e.message }
+}
+
+onMounted(() => { loadHistory(); timer = setInterval(validate,5000) })
 onUnmounted(() => { alive = false; clearInterval(timer) })
 </script>
 
@@ -62,18 +79,26 @@ onUnmounted(() => { alive = false; clearInterval(timer) })
       <button class="primary search-submit" :disabled="busy || !query.trim() || (mode !== 'keyword' && !consent)">{{ busy ? '正在检索…' : '检索资料 →' }}</button>
     </form>
     <p v-if="error" class="error" role="alert">{{ error }}<small v-if="errorTrace">追踪编号：{{ errorTrace }}</small></p>
+    <details class="search-history">
+      <summary>我的检索历史</summary>
+      <p v-if="historyError" class="error">{{ historyError }}</p>
+      <p v-else-if="!history.length" class="hint">暂无检索记录。</p>
+      <button v-for="item in history" :key="item.id" type="button" class="ghost" :disabled="busy" @click="query=item.query">
+        {{ item.query }} <small>{{ new Date(item.created_at).toLocaleString('zh-CN') }}</small>
+      </button>
+      <p v-if="history.length" class="hint">点击一条记录填回检索框。</p>
+    </details>
     <template v-if="result">
       <div v-for="warning in result.warnings" :key="warning.code" class="search-warning">{{ warning.message }}</div>
       <div class="result-heading"><h3>{{ result.results.length ? `检索到 ${result.results.length} 个证据片段` : '暂无可展示的证据片段' }}</h3><span>{{ result.timings_ms.total }} ms</span></div>
       <p class="hint">相似度、融合与重排分数用于排序，不代表答案正确率，请对照原文核验。</p>
       <article v-for="item in result.results" :key="item.chunk_id" class="evidence-card">
-        <div class="evidence-title"><div><span class="evidence-id">{{ item.evidence_id }}</span><strong>{{ item.title }}</strong><span class="badge">v{{ item.version_number }}</span></div><button class="ghost source-button" @click="source = item">查看原文</button></div>
+        <div class="evidence-title"><div><span class="evidence-id">{{ item.evidence_id }}</span><strong>{{ item.title }}</strong><span class="badge">v{{ item.version_number }}</span></div><div><button class="ghost source-button" @click="preview(item)">查看原文 ↗</button><button class="ghost source-button" @click="download(item)">下载文件</button></div></div>
         <p class="evidence-position">{{ item.page ? `第 ${item.page} 页` : `第 ${item.line_start}—${item.line_end} 行` }} {{ item.section ? `· ${item.section}` : '' }} · {{ item.filename }}</p>
         <pre>{{ item.text }}</pre><div class="evidence-meta"><span>{{ item.channels.map(c=>c==='keyword'?'关键词':'向量').join(' ＋ ') }}召回</span><span v-if="item.scores.rerank_score != null">重排分数 {{ item.scores.rerank_score }}</span><span v-else-if="item.scores.vector_similarity != null">向量相似度 {{ item.scores.vector_similarity }}</span></div>
       </article>
       <details class="search-details"><summary>查看本次检索过程</summary><p>关键词召回 {{ result.candidates.keyword }} · 向量召回 {{ result.candidates.vector }} · 融合 {{ result.candidates.fused }} · 过滤失效 {{ result.candidates.filtered }}</p><p>实际召回方式：{{ result.effective_mode }} · 重排序状态：{{ result.rerank_status }}</p><p v-for="(value,key) in result.timings_ms" :key="key">{{ key }}：{{ value }} ms</p><p class="trace">追踪编号：{{ result.trace_id }}</p></details>
     </template>
-    <SourcePreview v-if="source" :evidence="source" :api="api" @close="source = null" />
   </section>
 </template>
 
@@ -82,4 +107,8 @@ onUnmounted(() => { alive = false; clearInterval(timer) })
 </style>
 <style scoped>
 .evidence-card pre { font-family: inherit; font-size: 13px; line-height: 1.9; }
+</style>
+
+<style scoped>
+.search-history summary{cursor:pointer}.search-history button{display:block;margin:8px 0;max-width:100%;text-align:left;overflow-wrap:anywhere}.search-history small{display:block;color:#69798a}
 </style>

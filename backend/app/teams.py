@@ -24,7 +24,8 @@ class TeamInput(BaseModel):
 
 class ApplicationInput(BaseModel):
     model_config=ConfigDict(extra='forbid',str_strip_whitespace=True)
-    code:str=Field(min_length=1,max_length=16)
+    code:str|None=Field(default=None,min_length=1,max_length=16)
+    team_id:UUID|None=None
     message:str=Field(default='',max_length=1000)
 
 
@@ -62,6 +63,24 @@ def teams(user:CurrentUser,db:Db):
     return [team_output(db,t,m) for t,m in rows]
 
 
+@router.get('/team-directory')
+def directory(user: CurrentUser, db: Db, q: str = Query('', max_length=100),
+              offset: int = Query(0, ge=0)):
+    member = select(TeamMembership.team_id).where(
+        TeamMembership.team_id == Team.id, TeamMembership.user_id == user.id).exists()
+    pending = select(TeamApplication.id).where(
+        TeamApplication.team_id == Team.id, TeamApplication.user_id == user.id,
+        TeamApplication.status == 'pending').exists()
+    count = select(func.count()).select_from(TeamMembership).where(
+        TeamMembership.team_id == Team.id).correlate(Team).scalar_subquery()
+    query = select(Team.id, Team.name, Team.description, count).where(Team.is_active.is_(True), ~member, ~pending)
+    if term := q.strip():
+        query = query.where(Team.name.icontains(term, autoescape=True) | Team.description.icontains(term, autoescape=True))
+    rows = db.execute(query.order_by(Team.name, Team.id).offset(offset).limit(50))
+    return [{'id': str(id_), 'name': name, 'description': description, 'member_count': members}
+            for id_, name, description, members in rows]
+
+
 @router.post('/teams',status_code=201)
 def create_team(data:TeamInput,user:CurrentUser,db:Db,request:Request):
     if not user.teacher_verified or user.academic_identity!='teacher':
@@ -89,7 +108,10 @@ def update_team(team_id:UUID,data:TeamInput,user:CurrentUser,db:Db,request:Reque
 
 @router.post('/team-applications',status_code=201)
 def apply(data:ApplicationInput,user:CurrentUser,db:Db):
-    team=db.scalar(select(Team).where(Team.code==data.code.upper(),Team.is_active.is_(True)).with_for_update())
+    if bool(data.team_id) == bool(data.code):
+        raise HTTPException(422, '请选择一个团队')
+    selector = Team.id == data.team_id if data.team_id else Team.code == data.code.upper()
+    team=db.scalar(select(Team).where(selector,Team.is_active.is_(True)).with_for_update())
     if not team:
         raise HTTPException(404,'团队编号无效，请向团队管理员确认。')
     if db.get(TeamMembership,(team.id,user.id)):

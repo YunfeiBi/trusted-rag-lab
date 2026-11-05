@@ -5,10 +5,10 @@ import uuid
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from .dependencies import CurrentUser, Db, require_membership
-from .models import Chunk, Document, DocumentVersion, IngestionTask, utcnow
+from .models import Chunk, Document, DocumentVersion, IngestionTask, User, utcnow
 from .storage import storage_path
 from .runtime import MAX_ATTEMPTS
 from .file_processing import isolated
@@ -18,21 +18,23 @@ from .audit import record_event
 router = APIRouter(prefix='/api')
 
 
-def require_document(db, document_id, user_id, *, admin=False, lock=False):
+def require_document(db, document_id, user_id, *, admin=False, lock=False, allow_withdrawn=False):
     document = db.get(Document, document_id)
     if not document:
         raise HTTPException(404, '资料不存在或不可访问')
     require_membership(db, document.project_id, user_id, admin=admin, lock=lock)
     if lock:
         document = db.scalar(select(Document).where(Document.id == document_id).with_for_update().execution_options(populate_existing=True))
-    if not document.is_active:
+    if document.deleted_at or (not document.is_active and not allow_withdrawn):
         raise HTTPException(404, '资料已撤下或不可访问')
     return document
 
 
 def version_output(db, version):
     task = db.scalar(select(IngestionTask).where(IngestionTask.version_id == version.id))
+    uploader = db.get(User, version.created_by)
     return {
+        'uploader': uploader.display_name if uploader else None,
         'id': str(version.id), 'number': version.number, 'filename': version.filename,
         'status': version.status, 'file_size': version.file_size, 'chunk_count': version.chunk_count,
         'embedding_model': version.embedding_model, 'created_at': version.created_at,
@@ -42,7 +44,7 @@ def version_output(db, version):
 
 def task_output(task):
     return {'id': str(task.id), 'version_id': str(task.version_id), 'status': task.status,
-            'stage': task.stage, 'attempts': task.attempts, 'error_code': task.error_code, 'updated_at': task.updated_at,
+            'created_at': task.created_at, 'stage': task.stage, 'attempts': task.attempts, 'error_code': task.error_code, 'updated_at': task.updated_at,
             'max_attempts': MAX_ATTEMPTS,
             'retry_at': task.available_at if task.status == 'queued' and task.attempts else None,
             'lease_until': task.lease_until if task.status == 'processing' else None}
@@ -64,8 +66,8 @@ def save_version(db, settings, user, document, file, consent, pdf_password=None,
     if not filename or len(filename) > 200 or any(ord(char) < 32 for char in filename):
         raise HTTPException(422, '文件名不合法或过长')
     suffix = Path(filename).suffix.lower()
-    if suffix not in {'.pdf', '.md'}:
-        raise HTTPException(415, '仅支持文本型 PDF 和 UTF-8 Markdown')
+    if suffix not in {'.pdf', '.md', '.txt', '.csv', '.docx', '.xlsx', '.pptx'}:
+        raise HTTPException(415, '支持 PDF、Markdown、TXT、CSV、DOCX、XLSX 和 PPTX')
     user_id, project_id, document_id, title = user.id, document.project_id, document.id, document.title
     is_new = document.latest_version == 0
     db.rollback()  # Never hold project locks while receiving/preparing a large file.
@@ -149,12 +151,16 @@ def upload_version(document_id: uuid.UUID, user: CurrentUser, db: Db, request: R
 
 
 @router.get('/projects/{project_id}/documents')
-def list_documents(project_id: uuid.UUID, user: CurrentUser, db: Db):
+def list_documents(project_id: uuid.UUID, user: CurrentUser, db: Db, q: str = Query("", max_length=200), offset: int = Query(0, ge=0)):
     _, membership = require_membership(db, project_id, user.id)
-    query = select(Document).where(Document.project_id == project_id)
+    query = select(Document).where(Document.project_id == project_id, Document.deleted_at.is_(None))
+    if term := q.strip():
+        query = query.where(or_(Document.title.icontains(term, autoescape=True),
+            select(DocumentVersion.id).where(DocumentVersion.document_id == Document.id,
+                DocumentVersion.filename.icontains(term, autoescape=True)).exists()))
     if membership.role != 'admin':
         query = query.where(Document.is_active.is_(True))
-    return [document_output(db, d) for d in db.scalars(query.order_by(Document.created_at.desc()).limit(100))]
+    return [document_output(db, d) for d in db.scalars(query.order_by(Document.created_at.desc(), Document.id).offset(offset).limit(100))]
 
 
 @router.get('/documents/{document_id}/versions')
@@ -210,6 +216,38 @@ def withdraw(document_id: uuid.UUID, user: CurrentUser, db: Db,request:Request):
     return {'id': str(document.id), 'is_active': False}
 
 
+@router.post('/documents/{document_id}/restore')
+def restore(document_id: uuid.UUID, user: CurrentUser, db: Db, request: Request):
+    document = require_document(db, document_id, user.id, admin=True, lock=True, allow_withdrawn=True)
+    if document.is_active:
+        raise HTTPException(409, '资料仍可访问，无需恢复')
+    document.is_active = True
+    # Resume the newest interrupted version while any prior ready version remains usable.
+    version = db.scalar(select(DocumentVersion).where(
+        DocumentVersion.document_id == document.id, DocumentVersion.number == document.latest_version))
+    if version and version.status == 'cancelled':
+        task = db.scalar(select(IngestionTask).where(IngestionTask.version_id == version.id).with_for_update())
+        if task and task.status == 'cancelled':
+            version.status = task.status = task.stage = 'queued'
+            task.attempts = 0
+            task.error_code = task.lease_token = task.lease_until = None
+            task.available_at = task.updated_at = utcnow()
+    record_event(db, document.project_id, user.id, 'document.restored', document.id, request.state.trace_id)
+    db.commit()
+    return {'id': str(document.id), 'is_active': True}
+
+
+@router.delete('/documents/{document_id}', status_code=204)
+def delete_document(document_id: uuid.UUID, user: CurrentUser, db: Db, request: Request):
+    document = require_document(db, document_id, user.id, admin=True, lock=True, allow_withdrawn=True)
+    if document.is_active:
+        raise HTTPException(409, '请先撤下资料，再删除')
+    document.deleted_at = utcnow()
+    record_event(db, document.project_id, user.id, 'document.deleted', document.id, request.state.trace_id)
+    db.commit()
+
+
+
 def authorized_version(db, document_id, version_id, user_id):
     document = require_document(db, document_id, user_id)
     target = version_id or document.current_version_id
@@ -225,7 +263,12 @@ def source(document_id: uuid.UUID, user: CurrentUser, db: Db, request: Request, 
     path = storage_path(request.app.state.settings.storage_dir, version.storage_key)
     if not path.is_file():
         raise HTTPException(404, '原文件不存在')
-    media = 'application/pdf' if path.suffix == '.pdf' else 'text/plain'
+    media = {
+        '.pdf': 'application/pdf', '.md': 'text/plain', '.txt': 'text/plain', '.csv': 'text/plain',
+        '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    }.get(path.suffix, 'application/octet-stream')
     return FileResponse(path, media_type=media, filename=version.filename, content_disposition_type='inline')
 
 

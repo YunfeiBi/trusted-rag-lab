@@ -25,7 +25,7 @@ def parse_and_chunk(data, suffix: str, size=800, overlap=120, *, max_pages=500, 
     if not 0 <= overlap < size:
         raise ValueError('Invalid chunk size')
     parts = []
-    if suffix == '.md':
+    if suffix in {'.md', '.txt', '.csv'}:
         try:
             if isinstance(data, bytes):
                 text = data.decode('utf-8-sig')
@@ -82,6 +82,24 @@ def parse_and_chunk(data, suffix: str, size=800, overlap=120, *, max_pages=500, 
             raise
         except Exception as exc:
             raise IngestionError('INVALID_PDF') from exc
+    elif suffix in {'.docx', '.xlsx', '.pptx'}:
+        from .office import office_sections
+
+        count = 0
+        try:
+            for section, number, text in office_sections(BytesIO(data) if isinstance(data, bytes) else data, suffix, max_chars):
+                if not text.strip():
+                    continue
+                count += len(text)
+                if count > max_chars:
+                    raise IngestionError('TEXT_TOO_LARGE')
+                if len(parts) >= max_chunks:
+                    raise IngestionError('TOO_MANY_CHUNKS')
+                parts.append(TextPart(text, section=section[:200], line_start=number, line_end=number))
+        except IngestionError:
+            raise
+        except Exception as exc:
+            raise IngestionError('INVALID_OFFICE') from exc
     else:
         raise IngestionError('UNSUPPORTED_TYPE')
     if not parts:

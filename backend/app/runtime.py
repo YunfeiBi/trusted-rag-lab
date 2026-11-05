@@ -2,7 +2,8 @@
 from datetime import timedelta
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import AwareDatetime
 from sqlalchemy import func, select
 
 from .dependencies import CurrentUser, Db, require_membership
@@ -21,12 +22,18 @@ def file_limits(user: CurrentUser, request: Request):
 
 
 @router.get('/projects/{project_id}/tasks')
-def project_tasks(project_id: UUID,user:CurrentUser,db:Db,status:str|None=None,offset:int=Query(0,ge=0),limit:int=Query(30,ge=1,le=100)):
+def project_tasks(project_id: UUID,user:CurrentUser,db:Db,status:str|None=None,created_from:AwareDatetime|None=None,created_before:AwareDatetime|None=None,offset:int=Query(0,ge=0),limit:int=Query(30,ge=1,le=100)):
     require_membership(db,project_id,user.id)
     from .documents import task_output
     query = select(IngestionTask,Document.title,Document.id,DocumentVersion.number).join(DocumentVersion,DocumentVersion.id==IngestionTask.version_id).join(Document,Document.id==DocumentVersion.document_id).where(Document.project_id==project_id,Document.is_active.is_(True))
     if status:
         query = query.where(IngestionTask.status==status)
+    if created_from and created_before and created_from >= created_before:
+        raise HTTPException(422, '开始日期不能晚于结束日期')
+    if created_from:
+        query = query.where(IngestionTask.created_at >= created_from)
+    if created_before:
+        query = query.where(IngestionTask.created_at < created_before)
     rows = db.execute(query.order_by(IngestionTask.created_at.desc()).offset(offset).limit(limit))
     return [{**task_output(task),'document_title':title,'document_id':str(doc_id),'version_number':number} for task,title,doc_id,number in rows]
 
