@@ -5,6 +5,7 @@ import { openSource } from './files'
 const props = defineProps({ project:{type:Object,required:true},api:{type:Function,required:true} })
 const question = ref('')
 const mode = ref('hybrid')
+const workflowMode = ref('multi_agent')
 const consent = ref(false)
 const busy = ref(false)
 const error = ref('')
@@ -14,7 +15,7 @@ const history = ref([])
 let alive = true
 let polling = false
 let timer
-const statuses = {answered:'已生成引用回答',insufficient_evidence:'依据不足',generation_unavailable:'生成服务暂不可用',invalid_citations:'生成内容校验未通过',evidence_changed:'依据已变化'}
+const statuses = {review_rejected:'审查未通过',workflow_stopped:'协作已停止',answered:'已生成引用回答',insufficient_evidence:'依据不足',generation_unavailable:'生成服务暂不可用',invalid_citations:'生成内容校验未通过',evidence_changed:'依据已变化'}
 const visibleWarnings = computed(() => {
   const seen = new Set(record.value?.status === 'answered' ? [] : [record.value?.answer])
   return (record.value?.details.warnings || []).filter(warning => {
@@ -39,7 +40,7 @@ async function run(action) {
 function ask() {
   return run(async () => {
     record.value = null
-    const data = await props.api('/questions',{method:'POST',body:JSON.stringify({project_id:props.project.id,question:question.value,retrieval_mode:mode.value,allow_external_processing:consent.value})})
+    const data = await props.api('/questions',{method:'POST',body:JSON.stringify({project_id:props.project.id,question:question.value,retrieval_mode:mode.value,workflow_mode:workflowMode.value,allow_external_processing:consent.value})})
     if (alive) record.value = data
     await loadHistory()
   })
@@ -88,7 +89,7 @@ onUnmounted(() => { alive = false; clearInterval(timer) })
   <div class="qa-layout">
     <section class="panel question-panel">
       <p class="eyebrow">ASK WITH EVIDENCE</p><h2>向项目资料提问</h2><p class="muted">根据“{{ project.name }}”的当前可用资料回答。每次独立检索，不将旧回答当作新问题的证据。</p>
-      <form class="question-form" @submit.prevent="ask"><label>你的问题<textarea v-model="question" class="question-input" required maxlength="500" rows="3" placeholder="例如：项目管理员怎样调整成员访问权限？" /></label><label>证据检索方式<select v-model="mode" :disabled="busy"><option value="hybrid">混合检索与重排序</option><option value="keyword">关键词检索</option><option value="vector">纯向量检索</option></select></label><label class="qa-consent"><input v-model="consent" type="checkbox" required>允许将问题和有效证据发送至已配置的生成服务，以及所选的向量和重排序服务。</label><button class="primary ask-submit" :disabled="busy || !question.trim() || !consent">{{ busy ? '正在检索与生成…' : '生成引用回答 →' }}</button></form>
+      <form class="question-form" @submit.prevent="ask"><label>你的问题<textarea v-model="question" class="question-input" required maxlength="500" rows="3" placeholder="例如：项目管理员怎样调整成员访问权限？" /></label><label>回答模式<select v-model="workflowMode" :disabled="busy"><option value="multi_agent">检索、写作与独立审查</option><option value="single">基础引用问答</option></select></label><p class="hint">协作模式最多进行两轮处理、六次模型调用；审查不保证答案正确，请核对原文。</p><label>证据检索方式<select v-model="mode" :disabled="busy"><option value="hybrid">混合检索与重排序</option><option value="keyword">关键词检索</option><option value="vector">纯向量检索</option></select></label><label class="qa-consent"><input v-model="consent" type="checkbox" required>允许将问题和有效证据发送至已配置的生成服务，以及所选的向量和重排序服务。</label><button class="primary ask-submit" :disabled="busy || !question.trim() || !consent">{{ busy ? '正在检索与生成…' : '生成引用回答 →' }}</button></form>
       <p v-if="error" class="error" role="alert">{{ error }}<small v-if="errorTrace">追踪编号：{{ errorTrace }}</small></p>
       <section v-if="record" class="answer-block" :data-status="record.status">
         <div class="answer-heading"><h3>{{ statuses[record.status] }}</h3><span>{{ time(record.created_at) }}</span></div><p class="answered-question">{{ record.question }}</p>
@@ -97,8 +98,8 @@ onUnmounted(() => { alive = false; clearInterval(timer) })
         <p v-else class="qa-notice">{{ record.answer }}</p>
         <details v-if="record.citations.length" class="quote-details"><summary>查看引用摘录</summary><blockquote v-for="(citation,index) in record.citations" :key="index"><button class="citation-button" @click="openCitation(citation.evidence_id)">[{{ citation.evidence_id }}]</button> {{ citation.quote }}</blockquote></details>
         <div v-for="(warning,index) in visibleWarnings" :key="index" class="qa-warning">{{ warning.message }}</div>
-        <section v-if="record.evidence.length" class="qa-evidence"><h3>本次可核对的证据</h3><article v-for="evidence in record.evidence" :key="evidence.chunk_id"><div><span class="badge">{{ evidence.evidence_id }}</span> <strong>{{ evidence.title }}</strong> <small>v{{ evidence.version_number }}</small></div><p>{{ evidence.page ? `第 ${evidence.page} 页` : `第 ${evidence.line_start}—${evidence.line_end} 行` }} {{ evidence.section ? `· ${evidence.section}` : '' }}</p><button class="ghost" @click="source = evidence">查看原文</button></article></section>
-        <details class="qa-details"><summary>查看生成与检索记录</summary><p>模型：{{ record.details.chat_model }} · 提示版本：{{ record.details.prompt_version }}</p><p>检索：{{ record.details.retrieval?.effective_mode }} · 重排：{{ record.details.retrieval?.rerank_status }}</p><p>生成耗时：{{ record.details.generation_ms }} ms · 服务内总耗时：{{ record.details.total_ms }} ms</p><p>追踪编号：{{ record.trace_id }}</p></details>
+        <section v-if="record.evidence.length" class="qa-evidence"><h3>本次可核对的证据</h3><article v-for="evidence in record.evidence" :key="evidence.chunk_id"><div><span class="badge">{{ evidence.evidence_id }}</span> <strong>{{ evidence.title }}</strong> <small>v{{ evidence.version_number }}</small></div><p>{{ evidence.page ? `第 ${evidence.page} 页` : `第 ${evidence.line_start}—${evidence.line_end} 行` }} {{ evidence.section ? `· ${evidence.section}` : '' }}</p><button class="ghost" @click="openCitation(evidence.evidence_id)">查看原文</button></article></section>
+        <details v-if="record.details.agent_workflow" class="qa-details agent-trace"><summary>查看协作执行记录</summary><p>模型调用：{{ record.details.agent_workflow.model_calls }} / {{ record.details.agent_workflow.max_model_calls }} · 轮数上限：{{ record.details.agent_workflow.max_rounds }}</p><ol><li v-for="(event,index) in record.details.agent_workflow.trace" :key="index">{{ event.role }} · {{ event.event }} <span v-if="event.reason || event.code">· {{ event.reason || event.code }}</span><span v-if="event.evidence_count != null"> · 证据 {{ event.evidence_count }} 条</span></li></ol><p>记录仅含角色、结果与耗时，不含失败草稿。</p></details><details class="qa-details"><summary>查看生成与检索记录</summary><p>模型：{{ record.details.chat_model }} · 提示版本：{{ record.details.prompt_version }}</p><p>检索：{{ record.details.retrieval?.effective_mode }} · 重排：{{ record.details.retrieval?.rerank_status }}</p><p>生成耗时：{{ record.details.generation_ms }} ms · 服务内总耗时：{{ record.details.total_ms }} ms</p><p>追踪编号：{{ record.trace_id }}</p></details>
       </section>
       <div v-else-if="!busy" class="qa-empty">回答将在这里展示，引用可直接打开对应原文。</div>
     </section>

@@ -170,7 +170,7 @@ class Chunk(Base):
 
 class QuestionRecord(Base):
     __tablename__ = 'question_records'
-    __table_args__ = (CheckConstraint("status IN ('answered','insufficient_evidence','generation_unavailable','invalid_citations','evidence_changed')",name='ck_question_status'),)
+    __table_args__ = (CheckConstraint("status IN ('answered','insufficient_evidence','generation_unavailable','invalid_citations','evidence_changed','review_rejected','workflow_stopped')",name='ck_question_status'),)
     id: Mapped[uuid.UUID] = mapped_column(Uuid,primary_key=True,default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('app_users.id'),index=True)
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('projects.id'),index=True)

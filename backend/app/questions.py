@@ -14,10 +14,13 @@ from .ingestion import IngestionError
 from .models import Chunk, QuestionRecord
 from .search import SearchInput, authorized_scope, check_access, retrieve
 from .security import token_digest
+from .agent_workflow import run_agent_workflow
 
 router = APIRouter(prefix='/api')
 logger = logging.getLogger('trusted_rag.requests')
 MESSAGES = {
+    'review_rejected':'回答未通过独立审查，已隐藏草稿。请核对证据或调整问题。',
+    'workflow_stopped':'协作已达到时间或调用次数上限，未展示未验收草稿。',
     'insufficient_evidence':'现有资料不足以支持回答，请补充资料或换一种提问方式。',
     'generation_unavailable':'生成服务暂不可用，可先查看下方授权证据片段。',
     'invalid_citations':'生成内容未通过结构、引用或原文摘录校验，已停止展示该草稿，请查看证据或重新提问。',
@@ -39,6 +42,7 @@ class QuestionInput(BaseModel):
     retrieval_mode: Literal['keyword','vector','hybrid'] = 'hybrid'
     use_rerank: bool = True
     allow_external_processing: bool = False
+    workflow_mode: Literal['single', 'multi_agent'] = 'single'
 
 
 def valid_evidence(db, project_id, user_id, evidence, session_hash=None):
@@ -72,6 +76,8 @@ def ask(data: QuestionInput, user: CurrentUser, db: Db, request: Request,
     check_access(db,data.project_id,user_id,session_hash)
     if not data.allow_external_processing:
         raise HTTPException(422,'请确认允许将问题和有效证据发送至生成服务，以及所选向量和重排序服务')
+    if data.workflow_mode == 'multi_agent':
+        return ask_agents(data, user_id, db, request, session_hash)
     start = perf_counter()
     retrieved = retrieve(db,SearchInput(project_id=data.project_id,query=data.question,mode=data.retrieval_mode,
         use_rerank=data.use_rerank,allow_external_processing=True),user_id,request.app.state.embedding_client,request.app.state.rerank_client,session_hash)
@@ -127,6 +133,45 @@ def ask(data: QuestionInput, user: CurrentUser, db: Db, request: Request,
     db.commit()
     logger.info('event=question trace_id=%s status=%s evidence=%s generation_ms=%.2f',request.state.trace_id,status,len(evidence),generation_ms)
     return output_record(db,record,user_id,session_hash)
+
+
+def ask_agents(data, user_id, db, request, session_hash):
+    start = perf_counter()
+
+    def guard(evidence):
+        try:
+            return valid_evidence(db, data.project_id, user_id, evidence, session_hash)
+        finally:
+            db.rollback()  # No database transaction held while calling a model.
+
+    def search(query):
+        return retrieve(db, SearchInput(project_id=data.project_id, query=query,
+            mode=data.retrieval_mode, use_rerank=data.use_rerank, allow_external_processing=True),
+            user_id, request.app.state.embedding_client, request.app.state.rerank_client, session_hash)
+
+    outcome = run_agent_workflow(data.question, request.app.state.chat_client, search, guard)
+    status = outcome['status']
+    evidence = outcome['evidence']
+    answer = outcome['answer'] if status == 'answered' else MESSAGES[status]
+    claims, citations = outcome['claims'], outcome['citations']
+    details = outcome['details']
+    details.update(prompt_version=PROMPT_VERSION, chat_model=request.app.state.chat_client.model,
+        workflow_mode='multi_agent', total_ms=round((perf_counter() - start) * 1000, 2),
+        generation_ms=round(sum(event.get('elapsed_ms', 0) for event in
+            details['agent_workflow']['trace'] if event['event'] == 'model_call'), 2))
+    db.rollback()
+    check_access(db, data.project_id, user_id, session_hash)
+    if not valid_evidence(db, data.project_id, user_id, evidence, session_hash):
+        status, answer = 'evidence_changed', MESSAGES['evidence_changed']
+        evidence, claims, citations = [], [], []
+    record = QuestionRecord(user_id=user_id, project_id=data.project_id, question=data.question,
+        answer=answer, status=status, claims=claims, citations=citations, evidence=evidence,
+        details=details, trace_id=request.state.trace_id)
+    db.add(record)
+    db.commit()
+    logger.info('event=agent_question trace_id=%s status=%s calls=%s', request.state.trace_id,
+                status, details['agent_workflow']['model_calls'])
+    return output_record(db, record, user_id, session_hash)
 
 
 @router.get('/questions')

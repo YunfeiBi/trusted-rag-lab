@@ -17,6 +17,7 @@ dependencies = [
   "numpy",
   "alembic",
   "python-dotenv",
+  "langgraph>=1,<2",
 ]
 
 [dependency-groups]

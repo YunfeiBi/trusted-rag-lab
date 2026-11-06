@@ -1,0 +1,31 @@
+{
+  "date": "2026-11-06",
+  "full_staged_regression": {
+    "passed": 138,
+    "failed": 0
+  },
+  "original_project_agent_regression": {
+    "passed": 21,
+    "failed": 0
+  },
+  "offline_scripted_scenarios": {
+    "passed": 8,
+    "total": 8,
+    "real_model": false
+  },
+  "frontend_build": "passed_in_staged_and_original_project",
+  "ruff_F": "passed",
+  "synthetic_component_ui": [
+    "mode_submission",
+    "trace",
+    "desktop",
+    "390px_mobile",
+    "no_js_errors"
+  ],
+  "live_readiness": "HTTP_200_ok",
+  "live_api_schema": "single_and_multi_agent_modes_present",
+  "database_migration_head": "0010_agent_workflow",
+  "real_llm_quality_evaluated": false,
+  "human_acceptance": "pending",
+  "remote_push": "not_performed"
+}

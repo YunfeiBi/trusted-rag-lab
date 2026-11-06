@@ -1,0 +1,339 @@
+{
+  "mode": "scripted_offline_no_llm",
+  "scope": "control_flow_and_failure_handling_only",
+  "scenario_count": 8,
+  "passed": 8,
+  "cases": [
+    {
+      "scenario": "accept",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "passed": true,
+      "model_calls": 3,
+      "trace": [
+        {
+          "role": "retriever",
+          "event": "model_call",
+          "call": 1,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "retriever",
+          "event": "authorized_search",
+          "round": 1,
+          "evidence_count": 1
+        },
+        {
+          "role": "writer",
+          "event": "model_call",
+          "call": 2,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "reviewer",
+          "event": "model_call",
+          "call": 3,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "reviewer",
+          "event": "accept",
+          "reason": "accepted"
+        }
+      ]
+    },
+    {
+      "scenario": "rewrite",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "passed": true,
+      "model_calls": 5,
+      "trace": [
+        {
+          "role": "retriever",
+          "event": "model_call",
+          "call": 1,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "retriever",
+          "event": "authorized_search",
+          "round": 1,
+          "evidence_count": 1
+        },
+        {
+          "role": "writer",
+          "event": "model_call",
+          "call": 2,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "reviewer",
+          "event": "model_call",
+          "call": 3,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "reviewer",
+          "event": "rewrite",
+          "reason": "unsupported_claim"
+        },
+        {
+          "role": "writer",
+          "event": "model_call",
+          "call": 4,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "reviewer",
+          "event": "model_call",
+          "call": 5,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "reviewer",
+          "event": "accept",
+          "reason": "accepted"
+        }
+      ]
+    },
+    {
+      "scenario": "retrieve",
+      "expected_status": "answered",
+      "actual_status": "answered",
+      "passed": true,
+      "model_calls": 6,
+      "trace": [
+        {
+          "role": "retriever",
+          "event": "model_call",
+          "call": 1,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "retriever",
+          "event": "authorized_search",
+          "round": 1,
+          "evidence_count": 1
+        },
+        {
+          "role": "writer",
+          "event": "model_call",
+          "call": 2,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "reviewer",
+          "event": "model_call",
+          "call": 3,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "reviewer",
+          "event": "retrieve",
+          "reason": "missing_evidence"
+        },
+        {
+          "role": "retriever",
+          "event": "model_call",
+          "call": 4,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "retriever",
+          "event": "authorized_search",
+          "round": 2,
+          "evidence_count": 1
+        },
+        {
+          "role": "writer",
+          "event": "model_call",
+          "call": 5,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "reviewer",
+          "event": "model_call",
+          "call": 6,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "reviewer",
+          "event": "accept",
+          "reason": "accepted"
+        }
+      ]
+    },
+    {
+      "scenario": "reject",
+      "expected_status": "review_rejected",
+      "actual_status": "review_rejected",
+      "passed": true,
+      "model_calls": 3,
+      "trace": [
+        {
+          "role": "retriever",
+          "event": "model_call",
+          "call": 1,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "retriever",
+          "event": "authorized_search",
+          "round": 1,
+          "evidence_count": 1
+        },
+        {
+          "role": "writer",
+          "event": "model_call",
+          "call": 2,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "reviewer",
+          "event": "model_call",
+          "call": 3,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "reviewer",
+          "event": "refuse",
+          "reason": "missing_evidence"
+        }
+      ]
+    },
+    {
+      "scenario": "bad_quote",
+      "expected_status": "invalid_citations",
+      "actual_status": "invalid_citations",
+      "passed": true,
+      "model_calls": 3,
+      "trace": [
+        {
+          "role": "retriever",
+          "event": "model_call",
+          "call": 1,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "retriever",
+          "event": "authorized_search",
+          "round": 1,
+          "evidence_count": 1
+        },
+        {
+          "role": "writer",
+          "event": "model_call",
+          "call": 2,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "validator",
+          "event": "rejected",
+          "code": "QUOTE_NOT_IN_EVIDENCE"
+        },
+        {
+          "role": "writer",
+          "event": "model_call",
+          "call": 3,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "validator",
+          "event": "rejected",
+          "code": "QUOTE_NOT_IN_EVIDENCE"
+        }
+      ]
+    },
+    {
+      "scenario": "empty",
+      "expected_status": "insufficient_evidence",
+      "actual_status": "insufficient_evidence",
+      "passed": true,
+      "model_calls": 2,
+      "trace": [
+        {
+          "role": "retriever",
+          "event": "model_call",
+          "call": 1,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "retriever",
+          "event": "authorized_search",
+          "round": 1,
+          "evidence_count": 0
+        },
+        {
+          "role": "retriever",
+          "event": "model_call",
+          "call": 2,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "retriever",
+          "event": "authorized_search",
+          "round": 2,
+          "evidence_count": 0
+        }
+      ]
+    },
+    {
+      "scenario": "upstream_failure",
+      "expected_status": "generation_unavailable",
+      "actual_status": "generation_unavailable",
+      "passed": true,
+      "model_calls": 2,
+      "trace": [
+        {
+          "role": "retriever",
+          "event": "model_call",
+          "call": 1,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "retriever",
+          "event": "authorized_search",
+          "round": 1,
+          "evidence_count": 1
+        },
+        {
+          "role": "writer",
+          "event": "model_call",
+          "call": 2
+        },
+        {
+          "role": "supervisor",
+          "event": "failed",
+          "code": "GENERATION_UNAVAILABLE"
+        }
+      ]
+    },
+    {
+      "scenario": "call_budget",
+      "expected_status": "workflow_stopped",
+      "actual_status": "workflow_stopped",
+      "passed": true,
+      "model_calls": 1,
+      "trace": [
+        {
+          "role": "retriever",
+          "event": "model_call",
+          "call": 1,
+          "elapsed_ms": 0.01
+        },
+        {
+          "role": "retriever",
+          "event": "authorized_search",
+          "round": 1,
+          "evidence_count": 1
+        },
+        {
+          "role": "supervisor",
+          "event": "stopped",
+          "code": "MODEL_CALL_BUDGET"
+        }
+      ]
+    }
+  ]
+}
